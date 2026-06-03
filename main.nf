@@ -341,7 +341,7 @@ process TRAIN_SCANVI_SURGERY {
 
     singularity exec --nv \\
       --home "\$PWD" \\
-      --env PYTHONPATH="/home/epaaso/REPOS/sc-luca-explore/utils:\$PYTHONPATH" \\
+      --env PYTHONPATH="/home/epaaso/REPOS/sc-luca-explore/utils:\${PYTHONPATH:-}" \\
       --env XDG_CACHE_HOME="\$PWD/.cache" \\
       --env MPLCONFIGDIR="\$PWD/.cache/matplotlib" \\
       --env NUMBA_CACHE_DIR="\$PWD/.cache/numba" \\
@@ -356,7 +356,9 @@ process TRAIN_SCANVI_SURGERY {
         cp "\$f" "${runDir}/\$f"
       fi
     done
-    cp -r surgery_model "${runDir}/" || true
+    if [[ -d scanvi_model ]]; then
+      cp -r scanvi_model "${runDir}/"
+    fi
     """
 }
 

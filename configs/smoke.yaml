@@ -1,0 +1,94 @@
+experiment_name: scanvi_atlas_smoke
+input_h5ad: /data/luca_atlas/extended_tumor_hvg.h5ad
+shared_run_root: /datos/home/epaaso/slurm-gpu-jobs/scanvi_atlas_runs
+sif: /data/containers/scvi-raytune-py313-cu12.sif
+bind_paths: /datos,/data,/home,/datos/home
+work_dir: /datos/home/epaaso/slurm-gpu-jobs/nf-work/scanvi_atlas
+
+seed: 0
+batch_key: dataset
+labels_key: cell_type_tumor
+unlabeled_category: Unknown
+
+origin_key: origin
+origin_values: [tumor_primary]
+stage_key: uicc_stage
+stages: [I, II, III, "III or IV", IV]
+study_key: study
+exclude_studies:
+  - Goveia_Carmeliet_2020
+  - Leader_Merad_2021
+  - Guo_Zhang_2018
+  - Wu_Zhou_2021
+sample_key: sample
+split_batch_dataset:
+
+counts_layer: count
+drop_layers: [counts_length_scaled, count]
+drop_raw: true
+round_counts: false
+
+hvg_mode: precomputed
+hvg_n_top_genes: 1000
+hvg_flavor: seurat_v3
+hvg_batch_key: dataset
+hvg_column: is_highly_variable
+max_cells: 5000
+max_genes:
+save_prepared_h5ad: false
+
+dl_num_workers: 2
+torch_multiprocessing_sharing_strategy: file_system
+float32_matmul_precision: high
+numba_threads: 4
+compute_neighbors: false
+compute_leiden: false
+compute_umap: false
+n_neighbors: 8
+collapse_wu_dataset: true
+latent_obs_columns: [dataset, study, sample, uicc_stage]
+
+scvi_model_params:
+  n_layers: 1
+  n_latent: 5
+  n_hidden: 64
+  gene_likelihood: nb
+  dispersion: gene-batch
+  use_batch_norm: both
+  encode_covariates: true
+  deeply_inject_covariates: false
+scvi_train_params:
+  max_epochs: 1
+  batch_size: 128
+scvi_early_stopping: false
+scvi_early_stopping_kwargs:
+  early_stopping_monitor: elbo_validation
+  early_stopping_patience: 2
+  early_stopping_min_delta: 0.1
+scvi_plan_kwargs:
+  reduce_lr_on_plateau: true
+  lr_patience: 2
+  lr_factor: 0.05
+scvi_trainer_kwargs:
+  gradient_clip_val: 10.0
+
+scanvi_train_params:
+  max_epochs: 1
+  batch_size: 128
+scanvi_early_stopping: false
+scanvi_early_stopping_kwargs:
+  early_stopping_monitor: elbo_validation
+  early_stopping_patience: 2
+  early_stopping_min_delta: 0.7
+scanvi_plan_kwargs:
+  reduce_lr_on_plateau: true
+  lr_patience: 2
+  lr_factor: 0.1
+  lr: 1e-4
+scanvi_trainer_kwargs:
+  gradient_clip_val: 10.0
+
+slurm_cpus: 4
+slurm_memory: 16 GB
+slurm_time: "01:00:00"
+slurm_gpus: 1
