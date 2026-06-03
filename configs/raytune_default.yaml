@@ -36,7 +36,7 @@ search_space:
     n_layers:
       choice: [5, 6, 7]
     gene_likelihood:
-      choice: [nb, zinb]
+      choice: [nb]
   train_params:
     batch_size: 128
     plan_kwargs:

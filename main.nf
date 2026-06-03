@@ -17,34 +17,42 @@ setDefault('slurm_time', '12:00:00')
 setDefault('slurm_gpus', 0)
 
 // ---------------------------------------------------------
-// ATLAS PROCESS
+// DATA PREPARATION / DOWNLOAD
 // ---------------------------------------------------------
 
-process TRAIN_SCANVI_ATLAS {
-    label "gpu"
+process PREPARE_SURGERY_DATASET {
     stageInMode "copy"
-    cpus params.slurm_cpus as int
-    memory params.slurm_memory
-    time params.slurm_time
-    clusterOptions { params.slurm_gpus ? "--gres=gpu:rtx5080:${params.slurm_gpus}" : "" }
+    cpus 4
+    memory '16 GB'
 
     input:
-    path train_script
+    val dataset_name
+    path python_script
+
+    output:
+    path "prepared_dataset.h5ad"
+
+    script:
+    """
+    python "${python_script}" --dataset "${dataset_name}" --output "prepared_dataset.h5ad"
+    """
+}
+
+// ---------------------------------------------------------
+// CONFIGURATION GENERATORS
+// ---------------------------------------------------------
+
+process PREPARE_ATLAS_CONFIG {
+    executor 'local'
 
     output:
     path "run_config.json"
-    path "metrics.json", optional: true
-    path "versions.json", optional: true
-    path "scvi_history.csv", optional: true
-    path "scanvi_history.csv", optional: true
-    path "ref_latent.h5ad", optional: true
-    path "prepared_atlas.h5ad", optional: true
 
     script:
     def runDir = "${params.shared_run_root}/${params.experiment_name}"
     def config = [
         experiment_name: params.experiment_name,
-        input_h5ad: params.input_h5ad,
+        input_h5ad: "atlas_input.h5ad",
         shared_run_root: params.shared_run_root,
         run_dir: runDir,
         seed: params.seed,
@@ -97,63 +105,27 @@ process TRAIN_SCANVI_ATLAS {
     ]
     def configJson = JsonOutput.prettyPrint(JsonOutput.toJson(config))
     """
-    set -euo pipefail
-
-    mkdir -p "${runDir}"
-
     cat > run_config.json <<'JSON'
 ${configJson}
 JSON
-
-    mkdir -p .cache/matplotlib .cache/numba .cache/torch
-
-    singularity exec --nv \\
-      --home "\$PWD" \\
-      --env XDG_CACHE_HOME="\$PWD/.cache" \\
-      --env MPLCONFIGDIR="\$PWD/.cache/matplotlib" \\
-      --env NUMBA_CACHE_DIR="\$PWD/.cache/numba" \\
-      --env TORCH_HOME="\$PWD/.cache/torch" \\
-      --bind "${params.bind_paths}" \\
-      "${params.sif}" \\
-      python "${train_script}" --config run_config.json
-
-    cp run_config.json "${runDir}/run_config.json"
-    for f in metrics.json versions.json scvi_history.csv scanvi_history.csv ref_latent.h5ad prepared_atlas.h5ad; do
-      if [[ -f "\$f" ]]; then
-        cp "\$f" "${runDir}/\$f"
-      fi
-    done
     """
 }
 
-// ---------------------------------------------------------
-// SURGERY PROCESS
-// ---------------------------------------------------------
-
-process TRAIN_SCANVI_SURGERY {
-    label "gpu"
-    stageInMode "copy"
-    cpus params.slurm_cpus as int
-    memory params.slurm_memory
-    time params.slurm_time
-    clusterOptions { params.slurm_gpus ? "--gres=gpu:rtx5080:${params.slurm_gpus}" : "" }
+process PREPARE_SURGERY_CONFIG {
+    executor 'local'
 
     input:
-    path train_script
+    val reference_model_path
 
     output:
     path "run_config.json"
-    path "query.h5ad", optional: true
-    path "query_latent.h5ad", optional: true
-    path "*_predicted.csv", optional: true
-    path "*_ensembl.csv", optional: true
 
     script:
     def runDir = "${params.shared_run_root}/${params.experiment_name}"
     def config = [
         experiment_name: params.experiment_name,
-        input_h5ad: params.input_h5ad,
-        reference_model: params.reference_model,
+        input_h5ad: "query.h5ad",
+        reference_model: reference_model_path,
         shared_run_root: params.shared_run_root,
         run_dir: runDir,
         seed: params.seed,
@@ -172,39 +144,31 @@ process TRAIN_SCANVI_SURGERY {
     ]
     def configJson = JsonOutput.prettyPrint(JsonOutput.toJson(config))
     """
-    set -euo pipefail
-
-    mkdir -p "${runDir}"
-
     cat > run_config.json <<'JSON'
 ${configJson}
 JSON
+    """
+}
 
-    mkdir -p .cache/matplotlib .cache/numba .cache/torch
+process APPLY_RAYTUNE_CONFIG {
+    executor 'local'
 
-    singularity exec --nv \\
-      --home "\$PWD" \\
-      --env PYTHONPATH="/home/epaaso/REPOS/sc-luca-explore/utils:\$PYTHONPATH" \\
-      --env XDG_CACHE_HOME="\$PWD/.cache" \\
-      --env MPLCONFIGDIR="\$PWD/.cache/matplotlib" \\
-      --env NUMBA_CACHE_DIR="\$PWD/.cache/numba" \\
-      --env TORCH_HOME="\$PWD/.cache/torch" \\
-      --bind "${params.bind_paths}" \\
-      "${params.sif}" \\
-      python "${train_script}" --config run_config.json
+    input:
+    path base_config
+    path best_config
+    path apply_script
 
-    cp run_config.json "${runDir}/run_config.json"
-    for f in query.h5ad query_latent.h5ad *_predicted.csv *_ensembl.csv; do
-      if [[ -f "\$f" ]]; then
-        cp "\$f" "${runDir}/\$f"
-      fi
-    done
-    cp -r surgery_model "${runDir}/" || true
+    output:
+    path "run_config.yaml"
+
+    script:
+    """
+    python "${apply_script}" --base "${base_config}" --best-config "${best_config}" --output run_config.yaml
     """
 }
 
 // ---------------------------------------------------------
-// RAYTUNE PROCESS
+// ML TRAINING PROCESSES
 // ---------------------------------------------------------
 
 process RUN_SCVI_RAYTUNE {
@@ -291,25 +255,182 @@ JSON
     """
 }
 
+process TRAIN_SCANVI_ATLAS {
+    label "gpu"
+    stageInMode "copy"
+    cpus params.slurm_cpus as int
+    memory params.slurm_memory
+    time params.slurm_time
+    clusterOptions { params.slurm_gpus ? "--gres=gpu:rtx5080:${params.slurm_gpus}" : "" }
+
+    input:
+    path train_script
+    path config_file
+    path 'atlas_input.h5ad'
+
+    output:
+    path "${config_file}"
+    path "metrics.json", optional: true
+    path "versions.json", optional: true
+    path "scvi_history.csv", optional: true
+    path "scanvi_history.csv", optional: true
+    path "ref_latent.h5ad", optional: true
+    path "prepared_atlas.h5ad", optional: true
+    path "scanvi_model", optional: true
+
+    script:
+    def runDir = "${params.shared_run_root}/${params.experiment_name}"
+    """
+    set -euo pipefail
+
+    mkdir -p "${runDir}"
+    mkdir -p .cache/matplotlib .cache/numba .cache/torch
+
+    singularity exec --nv \\
+      --home "\$PWD" \\
+      --env XDG_CACHE_HOME="\$PWD/.cache" \\
+      --env MPLCONFIGDIR="\$PWD/.cache/matplotlib" \\
+      --env NUMBA_CACHE_DIR="\$PWD/.cache/numba" \\
+      --env TORCH_HOME="\$PWD/.cache/torch" \\
+      --bind "${params.bind_paths}" \\
+      "${params.sif}" \\
+      python "${train_script}" --config "${config_file}"
+
+    cp "${config_file}" "${runDir}/run_config.json"
+    for f in metrics.json versions.json scvi_history.csv scanvi_history.csv ref_latent.h5ad prepared_atlas.h5ad; do
+      if [[ -f "\$f" ]]; then
+        cp "\$f" "${runDir}/\$f"
+      fi
+    done
+
+    if [[ -d "${runDir}/scanvi_model" ]]; then
+      cp -r "${runDir}/scanvi_model" ./scanvi_model
+    fi
+    """
+}
+
+process TRAIN_SCANVI_SURGERY {
+    label "gpu"
+    stageInMode "copy"
+    cpus params.slurm_cpus as int
+    memory params.slurm_memory
+    time params.slurm_time
+    clusterOptions { params.slurm_gpus ? "--gres=gpu:rtx5080:${params.slurm_gpus}" : "" }
+
+    input:
+    path train_script
+    path config_file
+    path 'query.h5ad'
+    path 'scanvi_model'
+
+    output:
+    path "${config_file}"
+    path "query.h5ad", optional: true
+    path "query_latent.h5ad", optional: true
+    path "*_predicted.csv", optional: true
+    path "*_ensembl.csv", optional: true
+
+    script:
+    def runDir = "${params.shared_run_root}/${params.experiment_name}"
+    """
+    set -euo pipefail
+
+    mkdir -p "${runDir}"
+    mkdir -p .cache/matplotlib .cache/numba .cache/torch
+
+    singularity exec --nv \\
+      --home "\$PWD" \\
+      --env PYTHONPATH="/home/epaaso/REPOS/sc-luca-explore/utils:\$PYTHONPATH" \\
+      --env XDG_CACHE_HOME="\$PWD/.cache" \\
+      --env MPLCONFIGDIR="\$PWD/.cache/matplotlib" \\
+      --env NUMBA_CACHE_DIR="\$PWD/.cache/numba" \\
+      --env TORCH_HOME="\$PWD/.cache/torch" \\
+      --bind "${params.bind_paths}" \\
+      "${params.sif}" \\
+      python "${train_script}" --config "${config_file}"
+
+    cp "${config_file}" "${runDir}/run_config.json"
+    for f in query.h5ad query_latent.h5ad *_predicted.csv *_ensembl.csv; do
+      if [[ -f "\$f" ]]; then
+        cp "\$f" "${runDir}/\$f"
+      fi
+    done
+    cp -r surgery_model "${runDir}/" || true
+    """
+}
+
 // ---------------------------------------------------------
 // WORKFLOW DEFINITIONS
 // ---------------------------------------------------------
 
 workflow ATLAS {
-    // We only set defaults that are absolutely required if they are missing
     setDefault('experiment_name', 'scanvi_atlas_smoke')
     setDefault('shared_run_root', '/datos/LUCA_model/scanvi_atlas/runs')
     setDefault('sif', '/data/containers/scanvi-atlas-cu12.sif')
     setDefault('bind_paths', '/datos,/data,/home,/datos/home')
     setDefault('train_script', "$baseDir/bin/train_scanvi_atlas.py")
+    setDefault('input_h5ad', '/data/luca_atlas/extended.h5ad')
     setDefault('slurm_cpus', 20)
     setDefault('slurm_memory', '96 GB')
     setDefault('slurm_time', '48:00:00')
     setDefault('slurm_gpus', 1)
 
+    // ML defaults
+    setDefault('seed', 0)
+    setDefault('batch_key', 'dataset')
+    setDefault('labels_key', 'cell_type_tumor')
+    setDefault('unlabeled_category', 'Unknown')
+    setDefault('origin_key', 'origin')
+    setDefault('origin_values', ['tumor_primary'])
+    setDefault('stage_key', 'uicc_stage')
+    setDefault('stages', ['I', 'II', 'III', 'III or IV', 'IV'])
+    setDefault('study_key', 'study')
+    setDefault('exclude_studies', ['Goveia_Carmeliet_2020', 'Leader_Merad_2021', 'Guo_Zhang_2018', 'Wu_Zhou_2021'])
+    setDefault('sample_key', 'sample')
+    setDefault('split_batch_dataset', null)
+    setDefault('counts_layer', 'count')
+    setDefault('drop_layers', ['counts_length_scaled', 'count'])
+    setDefault('drop_raw', true)
+    setDefault('round_counts', false)
+    setDefault('hvg_mode', 'compute')
+    setDefault('hvg_n_top_genes', 6000)
+    setDefault('hvg_flavor', 'seurat_v3')
+    setDefault('hvg_batch_key', 'dataset')
+    setDefault('hvg_column', 'is_highly_variable')
+    setDefault('max_cells', null)
+    setDefault('max_genes', null)
+    setDefault('save_prepared_h5ad', false)
+    setDefault('dl_num_workers', 8)
+    setDefault('float32_matmul_precision', 'high')
+    setDefault('numba_threads', 30)
+    setDefault('compute_neighbors', true)
+    setDefault('compute_leiden', true)
+    setDefault('compute_umap', true)
+    setDefault('n_neighbors', 8)
+    setDefault('collapse_wu_dataset', true)
+    setDefault('latent_obs_columns', ['dataset', 'study', 'sample', 'uicc_stage'])
+    setDefault('tensorboard_logging', true)
+    setDefault('tensorboard_log_dir', null)
+    setDefault('reuse_scvi_model_if_exists', true)
+    setDefault('scvi_model_params', [n_layers: 4, n_latent: 10, n_hidden: 1024, gene_likelihood: 'nb', dispersion: 'gene-batch', use_batch_norm: 'both', encode_covariates: true, deeply_inject_covariates: false])
+    setDefault('scvi_train_params', [max_epochs: 100, batch_size: 128])
+    setDefault('scvi_early_stopping', true)
+    setDefault('scvi_early_stopping_kwargs', [early_stopping_monitor: 'elbo_validation', early_stopping_patience: 10, early_stopping_min_delta: 0.1])
+    setDefault('scvi_plan_kwargs', [reduce_lr_on_plateau: true, lr_patience: 8, lr_factor: 0.05])
+    setDefault('scvi_trainer_kwargs', [gradient_clip_val: 10.0])
+    setDefault('scanvi_train_params', [max_epochs: 300, batch_size: 128])
+    setDefault('scanvi_early_stopping', true)
+    setDefault('scanvi_early_stopping_kwargs', [early_stopping_monitor: 'elbo_validation', early_stopping_patience: 10, early_stopping_min_delta: 0.7])
+    setDefault('scanvi_plan_kwargs', [reduce_lr_on_plateau: true, lr_patience: 8, lr_factor: 0.1, lr: 1e-4])
+    setDefault('scanvi_trainer_kwargs', [gradient_clip_val: 10.0])
+
     new File("${params.shared_run_root}/${params.experiment_name}").mkdirs()
-    train_script = file(params.train_script)
-    TRAIN_SCANVI_ATLAS(train_script)
+    PREPARE_ATLAS_CONFIG()
+    
+    // Atlas input dataset
+    atlas_input = file(params.input_h5ad)
+    
+    TRAIN_SCANVI_ATLAS(file(params.train_script), PREPARE_ATLAS_CONFIG.out, atlas_input)
 }
 
 workflow SURGERY {
@@ -318,28 +439,68 @@ workflow SURGERY {
     setDefault('sif', '/data/containers/scvi-raytune-py313-cu12.sif')
     setDefault('bind_paths', '/datos,/data,/home,/datos/home')
     setDefault('train_script', "$baseDir/bin/run_surgery.py")
+    setDefault('download_script', "$baseDir/bin/download_and_preprocess_dataset.py")
+    setDefault('input_h5ad', '/datos/migccl/neto_maestria/luca_explore/surgeries/filtered_Trinks_Bishoff_2021_NSCLC.h5ad')
+    setDefault('reference_model', '/datos/migccl/neto_maestria/luca_explore/LUCA_model/hvg_integrated_scvi_scanvi_tumor_model_b128_lay4_h1024_wuSep_epocs300-300')
     setDefault('slurm_cpus', 8)
     setDefault('slurm_memory', '64 GB')
     setDefault('slurm_time', '12:00:00')
     setDefault('slurm_gpus', 1)
 
+    // ML defaults
+    setDefault('seed', 0)
+    setDefault('condition_key', 'dataset2')
+    setDefault('cell_type_key', 'cell_type_tumor')
+    setDefault('dataset_name', 'Bishoff_wu')
+    setDefault('dataset_name_short', 'Bishoff')
+    setDefault('dl_num_workers', 8)
+    setDefault('float32_matmul_precision', 'high')
+    setDefault('map_ensembl', true)
+    setDefault('max_cells', null)
+    setDefault('scanvi_train_params', [max_epochs: 200, batch_size: 128])
+    setDefault('scanvi_early_stopping', true)
+    setDefault('scanvi_early_stopping_kwargs', [early_stopping_monitor: 'elbo_validation', early_stopping_patience: 15, early_stopping_min_delta: 0.01])
+    setDefault('scanvi_plan_kwargs', [reduce_lr_on_plateau: true, lr_patience: 9, lr_factor: 0.1])
+
     new File("${params.shared_run_root}/${params.experiment_name}").mkdirs()
-    train_script = file(params.train_script)
-    TRAIN_SCANVI_SURGERY(train_script)
+
+    // Determine query dataset file (download if not exists and is a known dataset name)
+    def query_file_path = params.input_h5ad
+    def query_file
+    def is_known_dataset = (query_file_path =~ /(?i)(zuani|deng|hu|bishoff|trinks)/)
+    def file_exists = file(query_file_path).exists()
+    
+    if (!file_exists && is_known_dataset) {
+        def ds_name = ""
+        if (query_file_path =~ /(?i)zuani/) { ds_name = "Zuani" }
+        else if (query_file_path =~ /(?i)deng/) { ds_name = "Deng" }
+        else if (query_file_path =~ /(?i)(hu_zhang|hu2023|hu)/) { ds_name = "Hu" }
+        else if (query_file_path =~ /(?i)(bishoff|trinks)/) { ds_name = "Bishoff" }
+        
+        log.info "Query dataset ${query_file_path} not found locally. Preparing automatic download & preprocessing for ${ds_name}..."
+        PREPARE_SURGERY_DATASET(ds_name, file(params.download_script))
+        query_file = PREPARE_SURGERY_DATASET.out
+    } else {
+        query_file = file(query_file_path)
+    }
+
+    PREPARE_SURGERY_CONFIG("scanvi_model")
+    TRAIN_SCANVI_SURGERY(file(params.train_script), PREPARE_SURGERY_CONFIG.out, query_file, file(params.reference_model))
 }
 
 workflow RAYTUNE {
     setDefault('experiment_name', 'scvi_raytune_smoke')
     setDefault('shared_run_root', '/datos/home/epaaso/slurm-gpu-jobs/raytune_runs')
-    setDefault('sif', '/data/containers/scvi-raytune-cu12.sif')
+    setDefault('sif', '/data/containers/scvi-raytune-py313-cu12.sif')
     setDefault('bind_paths', '/datos,/data,/home,/datos/home')
     setDefault('train_script', "$baseDir/bin/train_scvi_raytune.py")
+    setDefault('input_h5ad', '/data/luca_atlas/extended_tumor_hvg.h5ad')
     setDefault('slurm_cpus', 4)
     setDefault('slurm_memory', '32 GB')
     setDefault('slurm_time', '02:00:00')
     setDefault('slurm_gpus', 1)
     
-    // Defaulting these params needed for raytune config assembly
+    // defaults needed for raytune
     setDefault('metric', 'validation_loss')
     setDefault('mode', 'min')
     setDefault('num_samples', 1)
@@ -351,8 +512,191 @@ workflow RAYTUNE {
     setDefault('gpus_per_trial', 1)
     setDefault('ray_cpus', 4)
     setDefault('ray_gpus', 1)
+    setDefault('search_space', [
+        model_params: [
+            n_hidden: [choice: [512, 1024, 2048]],
+            n_layers: [choice: [5, 6, 7]],
+            gene_likelihood: [choice: ['nb', 'zinb']]
+        ],
+        train_params: [
+            batch_size: 128,
+            plan_kwargs: [
+                reduce_lr_on_plateau: [choice: [true, false]]
+            ]
+        ]
+    ])
+    setDefault('initial_points', [[
+        model_params: [n_hidden: 2048, n_layers: 7, gene_likelihood: 'nb'],
+        train_params: [batch_size: 128, plan_kwargs: [reduce_lr_on_plateau: true]]
+    ]])
+    setDefault('scheduler', 'asha')
+    setDefault('searcher', 'hyperopt')
+    setDefault('scheduler_kwargs', null)
+    setDefault('searcher_kwargs', null)
+    setDefault('save_checkpoints', true)
+    setDefault('log_to_driver', true)
+    setDefault('max_cells', null)
+    setDefault('max_genes', null)
+    setDefault('output_root', "${params.shared_run_root}/${params.experiment_name}/raytune_logs")
 
     new File("${params.shared_run_root}/${params.experiment_name}").mkdirs()
-    train_script = file(params.train_script)
-    RUN_SCVI_RAYTUNE(train_script)
+    RUN_SCVI_RAYTUNE(file(params.train_script))
+}
+
+// ---------------------------------------------------------
+// AUTO-CHAINED END-TO-END PIPELINE WORKFLOW
+// ---------------------------------------------------------
+
+workflow PIPELINE {
+    // Shared execution defaults
+    setDefault('experiment_name', 'scanvi_pipeline_run')
+    setDefault('shared_run_root', '/datos/home/epaaso/slurm-gpu-jobs/raytune_runs')
+    setDefault('sif', '/data/containers/scvi-raytune-py313-cu12.sif')
+    setDefault('bind_paths', '/datos,/data,/home,/datos/home')
+    
+    // Scripts
+    setDefault('raytune_script', "$baseDir/bin/train_scvi_raytune.py")
+    setDefault('atlas_script', "$baseDir/bin/train_scanvi_atlas.py")
+    setDefault('surgery_script', "$baseDir/bin/run_surgery.py")
+    setDefault('apply_script', "$baseDir/bin/apply_raytune_best_config.py")
+    setDefault('download_script', "$baseDir/bin/download_and_preprocess_dataset.py")
+
+    // Datasets
+    setDefault('input_h5ad', '/data/luca_atlas/extended_tumor_hvg.h5ad')
+    setDefault('query_h5ad', '/datos/migccl/neto_maestria/luca_explore/surgeries/filtered_Trinks_Bishoff_2021_NSCLC.h5ad')
+
+    // Ray Tune parameters
+    setDefault('metric', 'validation_loss')
+    setDefault('mode', 'min')
+    setDefault('num_samples', 50)
+    setDefault('seed', 0)
+    setDefault('batch_key', 'dataset')
+    setDefault('labels_key', 'cell_type_tumor')
+    setDefault('model', 'SCVI')
+    setDefault('cpus_per_trial', 5)
+    setDefault('gpus_per_trial', 0.25)
+    setDefault('ray_cpus', 20)
+    setDefault('ray_gpus', 1)
+    setDefault('search_space', [
+        model_params: [
+            n_hidden: [choice: [512, 1024, 2048]],
+            n_layers: [choice: [5, 6, 7]],
+            gene_likelihood: [choice: ['nb', 'zinb']]
+        ],
+        train_params: [
+            batch_size: 128,
+            plan_kwargs: [
+                reduce_lr_on_plateau: [choice: [true, false]]
+            ]
+        ]
+    ])
+    setDefault('initial_points', [[
+        model_params: [n_hidden: 2048, n_layers: 7, gene_likelihood: 'nb'],
+        train_params: [batch_size: 128, plan_kwargs: [reduce_lr_on_plateau: true]]
+    ]])
+    setDefault('scheduler', 'asha')
+    setDefault('searcher', 'hyperopt')
+    setDefault('scheduler_kwargs', null)
+    setDefault('searcher_kwargs', null)
+    setDefault('save_checkpoints', true)
+    setDefault('log_to_driver', true)
+    setDefault('max_cells', null)
+    setDefault('max_genes', null)
+    setDefault('output_root', "${params.shared_run_root}/${params.experiment_name}/raytune_logs")
+
+    // Atlas parameters
+    setDefault('unlabeled_category', 'Unknown')
+    setDefault('origin_key', 'origin')
+    setDefault('origin_values', ['tumor_primary'])
+    setDefault('stage_key', 'uicc_stage')
+    setDefault('stages', ['I', 'II', 'III', 'III or IV', 'IV'])
+    setDefault('study_key', 'study')
+    setDefault('exclude_studies', ['Goveia_Carmeliet_2020', 'Leader_Merad_2021', 'Guo_Zhang_2018', 'Wu_Zhou_2021'])
+    setDefault('sample_key', 'sample')
+    setDefault('split_batch_dataset', null)
+    setDefault('counts_layer', 'count')
+    setDefault('drop_layers', ['counts_length_scaled', 'count'])
+    setDefault('drop_raw', true)
+    setDefault('round_counts', false)
+    setDefault('hvg_mode', 'compute')
+    setDefault('hvg_n_top_genes', 6000)
+    setDefault('hvg_flavor', 'seurat_v3')
+    setDefault('hvg_batch_key', 'dataset')
+    setDefault('hvg_column', 'is_highly_variable')
+    setDefault('save_prepared_h5ad', false)
+    setDefault('dl_num_workers', 8)
+    setDefault('float32_matmul_precision', 'high')
+    setDefault('numba_threads', 30)
+    setDefault('compute_neighbors', true)
+    setDefault('compute_leiden', true)
+    setDefault('compute_umap', true)
+    setDefault('n_neighbors', 8)
+    setDefault('collapse_wu_dataset', true)
+    setDefault('latent_obs_columns', ['dataset', 'study', 'sample', 'uicc_stage'])
+    setDefault('tensorboard_logging', true)
+    setDefault('tensorboard_log_dir', null)
+    setDefault('reuse_scvi_model_if_exists', true)
+    setDefault('scvi_trainer_kwargs', [gradient_clip_val: 10.0])
+    setDefault('scanvi_trainer_kwargs', [gradient_clip_val: 10.0])
+
+    // Surgery parameters
+    setDefault('condition_key', 'dataset2')
+    setDefault('cell_type_key', 'cell_type_tumor')
+    setDefault('dataset_name', 'Bishoff_wu')
+    setDefault('dataset_name_short', 'Bishoff')
+    setDefault('map_ensembl', true)
+    setDefault('scanvi_train_params', [max_epochs: 200, batch_size: 128])
+    setDefault('scanvi_early_stopping', true)
+    setDefault('scanvi_early_stopping_kwargs', [early_stopping_monitor: 'elbo_validation', early_stopping_patience: 15, early_stopping_min_delta: 0.01])
+    setDefault('scanvi_plan_kwargs', [reduce_lr_on_plateau: true, lr_patience: 9, lr_factor: 0.1])
+
+    // Execution resources
+    setDefault('slurm_cpus', 8)
+    setDefault('slurm_memory', '64 GB')
+    setDefault('slurm_time', '24:00:00')
+    setDefault('slurm_gpus', 1)
+
+    new File("${params.shared_run_root}/${params.experiment_name}").mkdirs()
+
+    // 1. Run Ray Tune hyperparameter exploration
+    RUN_SCVI_RAYTUNE(file(params.raytune_script))
+    
+    // 2. Prepare the base Atlas configuration json
+    PREPARE_ATLAS_CONFIG()
+    
+    // 3. Apply the best found config to the Atlas configuration json
+    APPLY_RAYTUNE_CONFIG(PREPARE_ATLAS_CONFIG.out, RUN_SCVI_RAYTUNE.out.best_config_json, file(params.apply_script))
+    
+    // 4. Train the reference Atlas with the optimized hyperparameters
+    atlas_input = file(params.input_h5ad)
+    TRAIN_SCANVI_ATLAS(file(params.atlas_script), APPLY_RAYTUNE_CONFIG.out, atlas_input)
+    
+    // 5. Determine query dataset file for surgery (download if not exists and is a known dataset name)
+    def query_file_path = params.query_h5ad
+    def query_file
+    def is_known_dataset = (query_file_path =~ /(?i)(zuani|deng|hu|bishoff|trinks)/)
+    def file_exists = file(query_file_path).exists()
+    
+    if (!file_exists && is_known_dataset) {
+        def ds_name = ""
+        if (query_file_path =~ /(?i)zuani/) { ds_name = "Zuani" }
+        else if (query_file_path =~ /(?i)deng/) { ds_name = "Deng" }
+        else if (query_file_path =~ /(?i)(hu_zhang|hu2023|hu)/) { ds_name = "Hu" }
+        else if (query_file_path =~ /(?i)(bishoff|trinks)/) { ds_name = "Bishoff" }
+        
+        log.info "Query dataset ${query_file_path} not found locally. Preparing automatic download & preprocessing for ${ds_name}..."
+        PREPARE_SURGERY_DATASET(ds_name, file(params.download_script))
+        query_file = PREPARE_SURGERY_DATASET.out
+    } else {
+        query_file = file(query_file_path)
+    }
+
+    // 6. Generate Surgery config and run Surgery on the query dataset using the newly trained reference model
+    PREPARE_SURGERY_CONFIG("scanvi_model")
+    TRAIN_SCANVI_SURGERY(file(params.surgery_script), PREPARE_SURGERY_CONFIG.out, query_file, TRAIN_SCANVI_ATLAS.out.scanvi_model)
+}
+
+// Default entry point runs the chained pipeline
+workflow {
+    PIPELINE()
 }
