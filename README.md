@@ -60,6 +60,26 @@ You can also run individual phases of the pipeline separately by using the `-ent
 
 *Note: The remaining phases—mutual information extraction, network generation with ARACNE-AP, and graph visualization—are currently **pending implementation** in the pipeline. Once implemented, they will be added as new workflows.*
 
+### Key Execution Parameters
+
+When running the pipeline or individual workflows, you can override default values in the configuration files or pass them dynamically on the command line (e.g., `--input_h5ad "/path/to/file"`). The most critical parameters include:
+
+#### 1. Input Datasets & Paths
+- `--input_h5ad`: Path to the input atlas/training AnnData file (e.g., `/data/luca_atlas/extended.h5ad` or `extended_tumor_hvg.h5ad`). If the file does not exist, the pipeline automatically retrieves and prepares it.
+- `--query_h5ad` (in `PIPELINE` mode) or `--input_h5ad` (in `SURGERY` mode): Path to the query AnnData file to project.
+- `--reference_model` (in `SURGERY` standalone mode): Folder containing the pre-trained SCANVI reference model (`model.pt`).
+- `--shared_run_root`: Root path where all run logs, TensorBoard files, checkpoints, and final `.h5ad` files are stored.
+- `--experiment_name`: Unique name identifier for the current run, used to structure output directories.
+
+#### 2. SCVI/SCANVI Model settings
+- `gene_likelihood` (under `scvi_model_params`): Set to `nb` (Negative Binomial) to model biological zeros. Avoid using `zinb` for this atlas context.
+- `lr` (under `scvi_plan_kwargs` and `scanvi_plan_kwargs`): Set to `1e-4` to prevent numerical training instabilities (NaNs).
+- `gradient_clip_val` (under `scvi_trainer_kwargs` and `scanvi_trainer_kwargs`): Set to `10.0` to preserve training stability.
+
+#### 3. Scaling & Multiprocessing Settings
+- `--dl_num_workers`: Set to `2` to prevent PyTorch dataloaders from triggering "Too many open files" errors.
+- `torch_multiprocessing_sharing_strategy`: Set to `file_system` to resolve resource sharing limits during dataloader multi-worker training.
+
 ---
 
 ## Automatic Dataset Downloading & Preprocessing
