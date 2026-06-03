@@ -20,7 +20,7 @@ setDefault('slurm_gpus', 0)
 // DATA PREPARATION / DOWNLOAD
 // ---------------------------------------------------------
 
-process PREPARE_SURGERY_DATASET {
+process PREPARE_DATASET {
     stageInMode "copy"
     cpus 4
     memory '16 GB'
@@ -181,6 +181,7 @@ process RUN_SCVI_RAYTUNE {
 
     input:
     path train_script
+    path 'raytune_input.h5ad'
 
     output:
     path "run_config.json"
@@ -194,7 +195,7 @@ process RUN_SCVI_RAYTUNE {
     def runDir = "${params.shared_run_root}/${params.experiment_name}"
     def config = [
         experiment_name: params.experiment_name,
-        input_h5ad: params.input_h5ad,
+        input_h5ad: "raytune_input.h5ad",
         output_root: params.output_root,
         shared_run_root: params.shared_run_root,
         run_dir: runDir,
@@ -369,6 +370,7 @@ workflow ATLAS {
     setDefault('sif', '/data/containers/scanvi-atlas-cu12.sif')
     setDefault('bind_paths', '/datos,/data,/home,/datos/home')
     setDefault('train_script', "$baseDir/bin/train_scanvi_atlas.py")
+    setDefault('download_script', "$baseDir/bin/download_and_preprocess_dataset.py")
     setDefault('input_h5ad', '/data/luca_atlas/extended.h5ad')
     setDefault('slurm_cpus', 20)
     setDefault('slurm_memory', '96 GB')
@@ -427,8 +429,23 @@ workflow ATLAS {
     new File("${params.shared_run_root}/${params.experiment_name}").mkdirs()
     PREPARE_ATLAS_CONFIG()
     
-    // Atlas input dataset
-    atlas_input = file(params.input_h5ad)
+    // Determine atlas input dataset (download if not exists)
+    def input_file_path = params.input_h5ad
+    def atlas_input
+    def is_atlas_dataset = (input_file_path =~ /(?i)(extended_tumor_hvg|extended)/)
+    def file_exists = file(input_file_path).exists()
+    
+    if (!file_exists && is_atlas_dataset) {
+        def ds_name = ""
+        if (input_file_path =~ /(?i)extended_tumor_hvg/) { ds_name = "extended_tumor_hvg" }
+        else if (input_file_path =~ /(?i)extended/) { ds_name = "extended" }
+        
+        log.info "Atlas input ${input_file_path} not found locally. Preparing automatic download & preprocessing for ${ds_name}..."
+        PREPARE_DATASET(ds_name, file(params.download_script))
+        atlas_input = PREPARE_DATASET.out
+    } else {
+        atlas_input = file(input_file_path)
+    }
     
     TRAIN_SCANVI_ATLAS(file(params.train_script), PREPARE_ATLAS_CONFIG.out, atlas_input)
 }
@@ -478,8 +495,8 @@ workflow SURGERY {
         else if (query_file_path =~ /(?i)(bishoff|trinks)/) { ds_name = "Bishoff" }
         
         log.info "Query dataset ${query_file_path} not found locally. Preparing automatic download & preprocessing for ${ds_name}..."
-        PREPARE_SURGERY_DATASET(ds_name, file(params.download_script))
-        query_file = PREPARE_SURGERY_DATASET.out
+        PREPARE_DATASET(ds_name, file(params.download_script))
+        query_file = PREPARE_DATASET.out
     } else {
         query_file = file(query_file_path)
     }
@@ -494,6 +511,7 @@ workflow RAYTUNE {
     setDefault('sif', '/data/containers/scvi-raytune-py313-cu12.sif')
     setDefault('bind_paths', '/datos,/data,/home,/datos/home')
     setDefault('train_script', "$baseDir/bin/train_scvi_raytune.py")
+    setDefault('download_script', "$baseDir/bin/download_and_preprocess_dataset.py")
     setDefault('input_h5ad', '/data/luca_atlas/extended_tumor_hvg.h5ad')
     setDefault('slurm_cpus', 4)
     setDefault('slurm_memory', '32 GB')
@@ -540,7 +558,26 @@ workflow RAYTUNE {
     setDefault('output_root', "${params.shared_run_root}/${params.experiment_name}/raytune_logs")
 
     new File("${params.shared_run_root}/${params.experiment_name}").mkdirs()
-    RUN_SCVI_RAYTUNE(file(params.train_script))
+
+    // Determine raytune input dataset (download if not exists)
+    def input_file_path = params.input_h5ad
+    def raytune_input
+    def is_atlas_dataset = (input_file_path =~ /(?i)(extended_tumor_hvg|extended)/)
+    def file_exists = file(input_file_path).exists()
+    
+    if (!file_exists && is_atlas_dataset) {
+        def ds_name = ""
+        if (input_file_path =~ /(?i)extended_tumor_hvg/) { ds_name = "extended_tumor_hvg" }
+        else if (input_file_path =~ /(?i)extended/) { ds_name = "extended" }
+        
+        log.info "Raytune input ${input_file_path} not found locally. Preparing automatic download & preprocessing for ${ds_name}..."
+        PREPARE_DATASET(ds_name, file(params.download_script))
+        raytune_input = PREPARE_DATASET.out
+    } else {
+        raytune_input = file(input_file_path)
+    }
+
+    RUN_SCVI_RAYTUNE(file(params.train_script), raytune_input)
 }
 
 // ---------------------------------------------------------
@@ -658,8 +695,26 @@ workflow PIPELINE {
 
     new File("${params.shared_run_root}/${params.experiment_name}").mkdirs()
 
+    // Determine raytune/atlas input dataset (download if not exists)
+    def input_file_path = params.input_h5ad
+    def atlas_input
+    def is_atlas_dataset = (input_file_path =~ /(?i)(extended_tumor_hvg|extended)/)
+    def file_exists = file(input_file_path).exists()
+    
+    if (!file_exists && is_atlas_dataset) {
+        def ds_name = ""
+        if (input_file_path =~ /(?i)extended_tumor_hvg/) { ds_name = "extended_tumor_hvg" }
+        else if (input_file_path =~ /(?i)extended/) { ds_name = "extended" }
+        
+        log.info "Atlas input ${input_file_path} not found locally. Preparing automatic download & preprocessing for ${ds_name}..."
+        PREPARE_DATASET(ds_name, file(params.download_script))
+        atlas_input = PREPARE_DATASET.out
+    } else {
+        atlas_input = file(input_file_path)
+    }
+
     // 1. Run Ray Tune hyperparameter exploration
-    RUN_SCVI_RAYTUNE(file(params.raytune_script))
+    RUN_SCVI_RAYTUNE(file(params.raytune_script), atlas_input)
     
     // 2. Prepare the base Atlas configuration json
     PREPARE_ATLAS_CONFIG()
@@ -668,16 +723,15 @@ workflow PIPELINE {
     APPLY_RAYTUNE_CONFIG(PREPARE_ATLAS_CONFIG.out, RUN_SCVI_RAYTUNE.out.best_config_json, file(params.apply_script))
     
     // 4. Train the reference Atlas with the optimized hyperparameters
-    atlas_input = file(params.input_h5ad)
     TRAIN_SCANVI_ATLAS(file(params.atlas_script), APPLY_RAYTUNE_CONFIG.out, atlas_input)
     
     // 5. Determine query dataset file for surgery (download if not exists and is a known dataset name)
     def query_file_path = params.query_h5ad
     def query_file
     def is_known_dataset = (query_file_path =~ /(?i)(zuani|deng|hu|bishoff|trinks)/)
-    def file_exists = file(query_file_path).exists()
+    def q_file_exists = file(query_file_path).exists()
     
-    if (!file_exists && is_known_dataset) {
+    if (!q_file_exists && is_known_dataset) {
         def ds_name = ""
         if (query_file_path =~ /(?i)zuani/) { ds_name = "Zuani" }
         else if (query_file_path =~ /(?i)deng/) { ds_name = "Deng" }
@@ -685,8 +739,8 @@ workflow PIPELINE {
         else if (query_file_path =~ /(?i)(bishoff|trinks)/) { ds_name = "Bishoff" }
         
         log.info "Query dataset ${query_file_path} not found locally. Preparing automatic download & preprocessing for ${ds_name}..."
-        PREPARE_SURGERY_DATASET(ds_name, file(params.download_script))
-        query_file = PREPARE_SURGERY_DATASET.out
+        PREPARE_DATASET(ds_name, file(params.download_script))
+        query_file = PREPARE_DATASET.out
     } else {
         query_file = file(query_file_path)
     }

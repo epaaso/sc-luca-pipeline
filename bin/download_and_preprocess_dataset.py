@@ -318,10 +318,53 @@ def deng_pipeline(data_dir, output_file):
     adata.write_h5ad(output_file)
     print(f"Deng dataset successfully prepared: {output_file}")
 
+def extended_atlas_pipeline(data_dir, output_file):
+    print("Executing Extended Atlas dataset download...")
+    extended_url = "https://datasets.cellxgene.cziscience.com/173984ce-d33a-46b6-ae96-4be47f6c67e8.h5ad"
+    download_file(extended_url, output_file)
+    print(f"Extended Atlas successfully downloaded: {output_file}")
+
+def extended_tumor_hvg_pipeline(data_dir, output_file):
+    print("Executing Extended Tumor HVG Atlas dataset preparation...")
+    extended_path = data_dir / "extended.h5ad"
+    extended_url = "https://datasets.cellxgene.cziscience.com/173984ce-d33a-46b6-ae96-4be47f6c67e8.h5ad"
+    download_file(extended_url, extended_path)
+    
+    print("Loading full extended atlas...")
+    adata = sc.read_h5ad(extended_path)
+    
+    print("Subsetting to tumor_primary...")
+    adata = adata[adata.obs.origin == 'tumor_primary'].copy()
+    
+    print("Filtering uicc_stage...")
+    stages = ['I', 'II', 'III', 'III or IV', 'IV']
+    adata = adata[adata.obs.uicc_stage.isin(stages)].copy()
+    
+    print("Filtering study...")
+    studies = ['Goveia_Carmeliet_2020', 'Leader_Merad_2021', 'Guo_Zhang_2018']
+    adata = adata[~adata.obs.study.isin(studies)].copy()
+    
+    print("Filtering highly variable genes...")
+    hvg_mask = (adata.var.is_highly_variable == True) | (adata.var.is_highly_variable == 'True')
+    adata = adata[:, hvg_mask].copy()
+    
+    if hasattr(adata, 'raw') and adata.raw is not None:
+        del adata.raw
+        
+    if 'counts_length_scaled' in adata.layers:
+        del adata.layers['counts_length_scaled']
+        
+    if 'count' in adata.layers:
+        adata.X = adata.layers['count'].copy()
+        
+    print("Writing subsetted atlas h5ad...")
+    adata.write_h5ad(output_file)
+    print(f"Extended Tumor HVG Atlas successfully prepared: {output_file}")
+
 def main():
-    parser = argparse.ArgumentParser(description="Download and preprocess surgery datasets automatically.")
-    parser.add_argument("--dataset", required=True, choices=["Bishoff", "Hu", "Zuani", "Deng"], help="Dataset to prepare.")
-    parser.add_argument("--output", required=True, help="Output path for the filtered .h5ad file.")
+    parser = argparse.ArgumentParser(description="Download and preprocess datasets automatically.")
+    parser.add_argument("--dataset", required=True, choices=["Bishoff", "Hu", "Zuani", "Deng", "extended", "extended_tumor_hvg"], help="Dataset to prepare.")
+    parser.add_argument("--output", required=True, help="Output path for the prepared .h5ad file.")
     parser.add_argument("--data-dir", default="./data_downloads", help="Directory for temporary raw downloads.")
     args = parser.parse_args()
     
@@ -342,6 +385,10 @@ def main():
         zuani_pipeline(data_dir, output_path)
     elif args.dataset == "Deng":
         deng_pipeline(data_dir, output_path)
+    elif args.dataset == "extended":
+        extended_atlas_pipeline(data_dir, output_path)
+    elif args.dataset == "extended_tumor_hvg":
+        extended_tumor_hvg_pipeline(data_dir, output_path)
         
     return 0
 
