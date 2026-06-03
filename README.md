@@ -6,56 +6,61 @@ This repository serves as the unified Nextflow automation of the preprocessing, 
 
 ![scRNA-seq Workflow](Workflow_dark.png "scRNA-seq Workflow")
 
-## Current Pipeline Status
-
-The pipeline currently implements the deep learning model training and dataset annotation phases:
-
-1. **Atlas Generation (`ATLAS` Workflow)**: Trains the scVI/scANVI reference models to embed and cluster reference datasets.
-2. **Dataset Annotation (`SURGERY` Workflow)**: Annotates external datasets via architectural surgery, mapping new cells onto the reference atlas.
-3. **Hyperparameter Tuning (`RAYTUNE` Workflow)**: Searches for the best model architecture via Ray Tune.
-
-*Note: The remaining phases—mutual information extraction, network generation with ARACNE-AP, and graph visualization—are currently **pending implementation** in the pipeline. Once implemented, they will be added as new workflows.*
-
-## Execution
-
-This pipeline relies on Nextflow and Singularity for reproducibility. It supports different profiles to easily run on a local workstation or on a remote Slurm GPU cluster.
-
-### Running a Workflow
-
-Use the `-entry` flag to specify which workflow to run: `ATLAS`, `SURGERY`, or `RAYTUNE`. You can override parameters by passing a custom config file with `-c`.
-
-```bash
-# Run the dataset surgery workflow using a specific config locally
-nextflow run main.nf -entry SURGERY -c configs/surgery_default.yaml -profile local
-
-# Run the atlas generation on a remote Slurm GPU cluster
-nextflow run main.nf -entry ATLAS -c configs/atlas_default.yaml -profile remote_gpu
-```
-
-### Profiles
-- `-profile local`: Runs the processes locally.
-- `-profile remote_gpu`: Submits jobs to the Slurm cluster queue.
-
-## Folder Structure
-
-- `main.nf` - The primary Nextflow workflow definition containing the entry workflows (`ATLAS`, `SURGERY`, `RAYTUNE`, and `PIPELINE`).
-- `nextflow.config` - Defines executor profiles (`local`, `remote_gpu`) and singularity bindings.
-- `bin/` - Python scripts executed by Nextflow for the various workflows, including dataset retrieval and model training.
-- `configs/` - Base YAML configurations for each workflow type.
-- `metadata/` - Contains dataset catalog files like `dsets.csv`.
-- `AGENTS.md` and `SKILLS.md` - Context for interacting with the AI agent system to develop or monitor the pipeline.
-
 ## Dataset Catalog (`metadata/dsets.csv`)
 
-The project contains a standardized registry catalog under [metadata/dsets.csv](file:///home/epaaso/REPOS/sc-luca-pipeline/metadata/dsets.csv). This CSV maps and documents the metadata, filtering parameters, and publications for each single-cell RNA-seq dataset integrated into this study.
+The datasets used in this pipeline are standardized and documented under [metadata/dsets.csv](file:///home/epaaso/REPOS/sc-luca-pipeline/metadata/dsets.csv). This CSV acts as the primary registry mapping quality control thresholds, platform chemistries, biological/clinical details, and publication DOIs for all integrated single-cell RNA-seq studies.
 
-Key columns in the table include:
+Key columns in the registry include:
 - `id`: The unique name identifier of the dataset (e.g., `Chen_Zhang_2020_NSCLC`, `Kim_Lee_2020_LUAD`, `Zuani_2024_NSCLC`).
 - `input_adata`: The expected local path to the raw/processed AnnData file.
 - `min_counts`, `max_counts`, `min_genes`, `max_genes`, `max_pct_mito`: Quality control (QC) thresholds applied during preprocessing.
 - `integrated cells n`: Total cells included from the study.
 - `doi`, `journal`, `names`: Citation and publication registry information.
 - `stage`, `disease`, `cell_sorting`, `prior_treatment`: Biological details and clinical variables of the dataset.
+
+---
+
+## Pipeline Execution Modes
+
+The pipeline supports two execution models: the default auto-chained end-to-end workflow, or individual standalone workflows.
+
+### 1. End-to-End Auto-Chained Pipeline (`PIPELINE` Mode)
+
+This is the default execution workflow. It chains all stages together:
+1. **Hyperparameter Search**: Runs hyperparameter optimization via Ray Tune over the SCVI model parameters.
+2. **Config Extraction**: Identifies the best trial and exports the optimal settings.
+3. **Atlas Training**: Merges the optimized parameters into the baseline configuration and trains a reference SCANVI model.
+4. **Dataset Surgery**: Maps the query dataset onto the newly trained SCANVI atlas to perform annotation.
+
+To run the complete chained pipeline:
+```bash
+# Run end-to-end pipeline locally
+nextflow run main.nf -profile local
+
+# Run end-to-end pipeline on Slurm GPU cluster
+nextflow run main.nf -profile remote_gpu
+```
+
+### 2. Standalone Workflows
+
+You can also run individual phases of the pipeline separately by using the `-entry` flag:
+
+* **Atlas Generation (`ATLAS` Workflow)**: Trains the scVI/scANVI reference models to embed and cluster reference datasets.
+  ```bash
+  nextflow run main.nf -entry ATLAS -c configs/atlas_default.yaml -profile remote_gpu
+  ```
+* **Dataset Annotation (`SURGERY` Workflow)**: Annotates external query datasets via architectural surgery using a pre-trained reference model.
+  ```bash
+  nextflow run main.nf -entry SURGERY -c configs/surgery_default.yaml -profile local
+  ```
+* **Hyperparameter Tuning (`RAYTUNE` Workflow)**: Explores SCVI model parameter search spaces via Ray Tune.
+  ```bash
+  nextflow run main.nf -entry RAYTUNE -c configs/raytune_default.yaml -profile remote_gpu
+  ```
+
+*Note: The remaining phases—mutual information extraction, network generation with ARACNE-AP, and graph visualization—are currently **pending implementation** in the pipeline. Once implemented, they will be added as new workflows.*
+
+---
 
 ## Automatic Dataset Downloading & Preprocessing
 
@@ -68,3 +73,14 @@ To make execution seamless and remote-friendly (especially on environments witho
 
 2. **Query/Surgery Datasets**:
    - If the input query file specified for dataset surgery (e.g., `Bishoff`, `Hu`, `Zuani`, `Deng`) does not exist at its designated location, the pipeline automatically fetches the raw matrices/barcodes/features from their public endpoints (EBI BioStudies, Figshare, GEO, CodeOcean) and runs the corresponding filtering pipeline defined in `bin/download_and_preprocess_dataset.py` before executing the surgery mapping.
+
+---
+
+## Folder Structure
+
+- `main.nf` - The primary Nextflow workflow definition containing the entry workflows (`ATLAS`, `SURGERY`, `RAYTUNE`, and `PIPELINE`).
+- `nextflow.config` - Defines executor profiles (`local`, `remote_gpu`) and singularity bindings.
+- `bin/` - Python scripts executed by Nextflow for the various workflows, including dataset retrieval and model training.
+- `configs/` - Base YAML configurations for each workflow type.
+- `metadata/` - Contains dataset catalog files like `dsets.csv`.
+- `AGENTS.md` and `SKILLS.md` - Context for interacting with the AI agent system to develop or monitor the pipeline.
