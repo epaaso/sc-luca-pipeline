@@ -1,0 +1,35 @@
+experiment_name: scanvi_surgery_default
+input_h5ad: /datos/migccl/neto_maestria/luca_explore/surgeries/filtered_Trinks_Bishoff_2021_NSCLC.h5ad
+reference_model: /datos/migccl/neto_maestria/luca_explore/LUCA_model/hvg_integrated_scvi_scanvi_tumor_model_b128_lay4_h1024_wuSep_epocs300-300
+shared_run_root: /datos/home/epaaso/slurm-gpu-jobs/scanvi_surgery/runs
+sif: /data/containers/scvi-raytune-py313-cu12.sif
+bind_paths: /datos,/data,/home,/datos/home
+
+seed: 0
+condition_key: dataset2
+cell_type_key: cell_type_tumor
+dataset_name: Bishoff_wu
+dataset_name_short: Bishoff
+
+dl_num_workers: 8
+float32_matmul_precision: high
+
+map_ensembl: true
+
+scanvi_train_params:
+  max_epochs: 200
+  batch_size: 128
+scanvi_early_stopping: true
+scanvi_early_stopping_kwargs:
+  early_stopping_monitor: elbo_validation
+  early_stopping_patience: 15
+  early_stopping_min_delta: 0.01
+scanvi_plan_kwargs:
+  reduce_lr_on_plateau: true
+  lr_patience: 9
+  lr_factor: 0.1
+
+slurm_cpus: 8
+slurm_memory: 64 GB
+slurm_time: "12:00:00"
+slurm_gpus: 1

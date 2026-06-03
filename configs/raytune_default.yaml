@@ -1,0 +1,54 @@
+experiment_name: scvi_raytune_default
+input_h5ad: /data/luca_atlas/extended_tumor_hvg.h5ad
+output_root: /datos/LUCA_model/raytune_nextflow
+shared_run_root: /datos/home/epaaso/slurm-gpu-jobs/raytune_runs
+sif: /data/containers/scvi-raytune-cu12.sif
+bind_paths: /datos,/data,/home,/datos/home
+work_dir: /datos/home/epaaso/slurm-gpu-jobs/nf-work/scvi_raytune
+
+model: SCVI
+metric: validation_loss
+mode: min
+seed: 0
+batch_key: dataset
+labels_key: cell_type_tumor
+
+num_samples: 50
+max_cells:
+max_genes:
+
+slurm_cpus: 20
+slurm_memory: 96 GB
+slurm_time: 48:00:00
+slurm_gpus: 1
+
+ray_cpus: 20
+ray_gpus: 1
+cpus_per_trial: 5
+gpus_per_trial: 0.25
+
+scheduler: asha
+searcher: hyperopt
+search_space:
+  model_params:
+    n_hidden:
+      choice: [512, 1024, 2048]
+    n_layers:
+      choice: [5, 6, 7]
+    gene_likelihood:
+      choice: [nb, zinb]
+  train_params:
+    batch_size: 128
+    plan_kwargs:
+      reduce_lr_on_plateau:
+        choice: [true, false]
+
+initial_points:
+  - model_params:
+      n_hidden: 2048
+      n_layers: 7
+      gene_likelihood: nb
+    train_params:
+      batch_size: 128
+      plan_kwargs:
+        reduce_lr_on_plateau: true
