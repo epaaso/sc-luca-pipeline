@@ -1,0 +1,34 @@
+experiment_name: luca_subcluster_default
+shared_run_root: /datos/home/epaaso/slurm-gpu-jobs/subcluster/runs
+
+# Set exactly one input. The default manifest describes the canonical
+# Atlas + Bishoff + Deng + Hu + Zuani cohort.
+subcluster_cohort_manifest: configs/subcluster_cohort_default.json
+subcluster_input_h5ad:
+
+subcluster_seed: 42
+# GPU mode always runs FAISS neighbor search on GPU. Use "rapids" only on
+# hardware supported by the container's CUDA toolkit.
+subcluster_gpu_postprocess: cpu
+subcluster_n_neighbors: 30
+subcluster_leiden_resolution: 0.5
+subcluster_umap_min_dist: 0.03
+subcluster_umap_spread: 0.6
+subcluster_faiss_nlist:
+subcluster_faiss_nprobe:
+
+subcluster_tumor_pattern: Tumor
+subcluster_epithelial_types:
+  - Alveolar cell type 1
+  - Alveolar cell type 2
+  - ROS1+ healthy epithelial
+  - transitional club/AT2
+  - Club
+  - Ciliated
+
+early_mapping_json:
+late_mapping_json:
+
+subcluster_cpus: 16
+subcluster_memory: 64 GB
+subcluster_time: "12:00:00"

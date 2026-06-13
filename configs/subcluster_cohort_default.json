@@ -1,0 +1,52 @@
+{
+  "atlas": {
+    "name": "Atlas",
+    "latent_h5ad": "/datos/LUCA_model/scanvi_atlas/runs/scanvi_atlas_default/ref_latent.h5ad",
+    "representation": "X",
+    "cell_type_key": "cell_type",
+    "batch_key": "batch",
+    "stage_key": "uicc_stage"
+  },
+  "queries": [
+    {
+      "name": "Bishoff",
+      "input_h5ad": "/datos/migccl/neto_maestria/luca_explore/surgeries/filtered_Trinks_Bishoff_2021_NSCLC.h5ad",
+      "download_name": "Bishoff",
+      "latent_h5ad": "/datos/home/epaaso/slurm-gpu-jobs/scanvi_surgery/runs/scanvi_surgery_full/query_latent.h5ad",
+      "representation": "X_scVI",
+      "cell_type_key": "predicted_cell_type",
+      "batch_key": "sample",
+      "stage_override": "III or IV"
+    },
+    {
+      "name": "Deng",
+      "input_h5ad": "/datos/migccl/neto_maestria/luca_explore/surgeries/filtered_Deng_Liu_LUAD_2024.h5ad",
+      "download_name": "Deng",
+      "latent_h5ad": "/datos/home/epaaso/slurm-gpu-jobs/scanvi_surgery/runs/scanvi_surgery_deng/query_latent.h5ad",
+      "representation": "X_scVI",
+      "cell_type_key": "predicted_cell_type",
+      "batch_key": "sample",
+      "stage_key": "Pathological stage"
+    },
+    {
+      "name": "Hu",
+      "input_h5ad": "/datos/migccl/neto_maestria/luca_explore/surgeries/filtered_Hu_Zhang_2023_NSCLC.h5ad",
+      "download_name": "Hu",
+      "latent_h5ad": "/datos/home/epaaso/slurm-gpu-jobs/scanvi_surgery/runs/scanvi_surgery_hu/query_latent.h5ad",
+      "representation": "X_scVI",
+      "cell_type_key": "predicted_cell_type",
+      "batch_key": "sample",
+      "stage_key": "Clinical Stage"
+    },
+    {
+      "name": "Zuani",
+      "input_h5ad": "/datos/migccl/neto_maestria/luca_explore/surgeries/filtered_Zuani_2024_NSCLC.h5ad",
+      "download_name": "Zuani",
+      "latent_h5ad": "/datos/home/epaaso/slurm-gpu-jobs/scanvi_surgery/runs/scanvi_surgery_zuani/query_latent.h5ad",
+      "representation": "X_scVI",
+      "cell_type_key": "predicted_cell_type",
+      "batch_key": "sample",
+      "stage_key": "stage"
+    }
+  ]
+}

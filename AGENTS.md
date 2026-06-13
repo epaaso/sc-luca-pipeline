@@ -1,7 +1,7 @@
 # Agent Notes For This Repo
 
 This repo contains the unified Nextflow pipeline for the LUCA single-cell analysis.
-The workflows handle the deep learning portions of the project: `ATLAS` (model training), `SURGERY` (dataset annotation), and `RAYTUNE` (hyperparameter search).
+The workflows handle `ATLAS` (model training), `SURGERY` (dataset annotation), `RAYTUNE` (hyperparameter search), and `SUBCLUSTER` (early/late tumor-epithelial clustering).
 
 ## Ground Rules
 
@@ -30,11 +30,17 @@ Container image commonly used:
 /data/containers/scvi-raytune-py313-cu12.sif
 ```
 
+Subclustering GPU image:
+
+```text
+/data/containers/sc-luca-subcluster-cu12.sif
+```
+
 ## Pipeline Execution
 
-The pipeline is implemented in Nextflow, using `main.nf` with multiple named entry workflows (`ATLAS`, `SURGERY`, `RAYTUNE`).
+The pipeline is implemented in Nextflow, using `main.nf` with multiple named entry workflows (`ATLAS`, `SURGERY`, `RAYTUNE`, `SUBCLUSTER`).
 Executions can be parameterized with external YAML configurations.
-The pipeline supports `local` and `remote_gpu` profiles via `nextflow.config` to gracefully handle different compute environments.
+The pipeline supports `local`, `local_cpu`, `local_gpu`, and `remote_gpu` profiles via `nextflow.config`.
 
 ## Final Outputs
 
@@ -42,6 +48,7 @@ Outputs depend on the workflow run:
 - **ATLAS**: `ref_latent.h5ad`, `scvi_model/`, `scanvi_model/`, and `metrics.json`.
 - **SURGERY**: `query.h5ad`, `query_latent.h5ad`, `*_predicted.csv`, and mapped `surgery_model/`.
 - **RAYTUNE**: `best_config.json`, `best_result.json`, `summary.csv`.
+- **SUBCLUSTER**: merged/stage latent H5ADs, Leiden/UMAP CSVs, QC/diagnostic files, and optional mapped per-dataset predictions.
 
 ## Architectural Insights & Future Work
 

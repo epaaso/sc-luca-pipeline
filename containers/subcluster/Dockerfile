@@ -1,0 +1,22 @@
+FROM netopaas/faiss:cugraph-24-12
+
+ENV PATH=/opt/conda/bin:${PATH} \
+    PYTHONUNBUFFERED=1 \
+    MPLBACKEND=Agg
+
+RUN /opt/conda/bin/python -m pip install --no-cache-dir \
+      numpy==1.26.4 \
+      pandas==2.1.4 \
+      scipy==1.12.0 \
+      anndata==0.12.3 \
+      scanpy==1.11.5 \
+      igraph==0.11.9 \
+      leidenalg==0.10.2 \
+      umap-learn==0.5.9.post2 \
+      matplotlib==3.10.7 \
+      seaborn==0.13.2 \
+      pyyaml==6.0.3 \
+      h5py==3.15.1 \
+      pytest==9.0.1
+
+WORKDIR /work

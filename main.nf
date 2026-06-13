@@ -1,6 +1,7 @@
 #!/usr/bin/env nextflow
 
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 
 nextflow.enable.dsl = 2
 
@@ -15,6 +16,77 @@ setDefault('slurm_cpus', 8)
 setDefault('slurm_memory', '32 GB')
 setDefault('slurm_time', '12:00:00')
 setDefault('slurm_gpus', 0)
+setDefault('subcluster_backend', 'cpu')
+setDefault('subcluster_container', 'sc-luca-subcluster:latest')
+setDefault('subcluster_cpus', 16)
+setDefault('subcluster_memory', '64 GB')
+setDefault('subcluster_time', '12:00:00')
+setDefault('subcluster_gpus', 0)
+setDefault('subcluster_python', 'python')
+setDefault('subcluster_pythonpath', '')
+setDefault('subcluster_ld_library_path', '')
+
+def subclusterDefaults = {
+    setDefault('subcluster_script', "$baseDir/bin/run_subcluster.py")
+    setDefault('subcluster_input_h5ad', null)
+    setDefault(
+        'subcluster_cohort_manifest',
+        params.subcluster_input_h5ad ? null : "$baseDir/configs/subcluster_cohort_default.json"
+    )
+    setDefault('subcluster_engine', 'faiss')
+    setDefault('subcluster_backend', 'cpu')
+    setDefault('subcluster_gpu_postprocess', 'cpu')
+    setDefault('subcluster_container', 'sc-luca-subcluster:latest')
+    setDefault('subcluster_seed', 42)
+    setDefault('subcluster_n_neighbors', 30)
+    setDefault('subcluster_leiden_resolution', 0.5)
+    setDefault('subcluster_umap_min_dist', 0.03)
+    setDefault('subcluster_umap_spread', 0.6)
+    setDefault('subcluster_faiss_nlist', null)
+    setDefault('subcluster_faiss_nprobe', null)
+    setDefault('subcluster_tumor_pattern', 'Tumor')
+    setDefault('subcluster_epithelial_types', [
+        'Alveolar cell type 1',
+        'Alveolar cell type 2',
+        'ROS1+ healthy epithelial',
+        'transitional club/AT2',
+        'Club',
+        'Ciliated'
+    ])
+    setDefault('early_mapping_json', null)
+    setDefault('late_mapping_json', null)
+    setDefault('subcluster_cpus', 16)
+    setDefault('subcluster_memory', '64 GB')
+    setDefault('subcluster_time', '12:00:00')
+    setDefault('subcluster_gpus', 0)
+    setDefault('subcluster_python', 'python')
+    setDefault('subcluster_pythonpath', '')
+    setDefault('subcluster_ld_library_path', '')
+}
+
+def absoluteParamPath = { value ->
+    value ? file(value).toAbsolutePath().toString() : null
+}
+
+def subclusterConfig = { manifestPath, inputPath ->
+    [
+        subcluster_cohort_manifest: manifestPath,
+        subcluster_input_h5ad: inputPath,
+        subcluster_output_dir: 'subcluster_results',
+        subcluster_engine: params.subcluster_engine,
+        subcluster_backend: params.subcluster_backend,
+        subcluster_gpu_postprocess: params.subcluster_gpu_postprocess,
+        subcluster_seed: params.subcluster_seed,
+        subcluster_n_neighbors: params.subcluster_n_neighbors,
+        subcluster_leiden_resolution: params.subcluster_leiden_resolution,
+        subcluster_umap_min_dist: params.subcluster_umap_min_dist,
+        subcluster_umap_spread: params.subcluster_umap_spread,
+        subcluster_faiss_nlist: params.subcluster_faiss_nlist,
+        subcluster_faiss_nprobe: params.subcluster_faiss_nprobe,
+        subcluster_tumor_pattern: params.subcluster_tumor_pattern,
+        subcluster_epithelial_types: params.subcluster_epithelial_types
+    ]
+}
 
 // ---------------------------------------------------------
 // DATA PREPARATION / DOWNLOAD
@@ -167,6 +239,118 @@ process APPLY_RAYTUNE_CONFIG {
     """
 }
 
+process PREPARE_SUBCLUSTER_CONFIG {
+    executor 'local'
+
+    input:
+    path subcluster_input
+
+    output:
+    path "subcluster_config.json", emit: config_file
+
+    script:
+    def manifestPath = params.subcluster_input_h5ad ? null : subcluster_input.toString()
+    def inputPath = params.subcluster_input_h5ad ? subcluster_input.toString() : null
+    def configJson = JsonOutput.prettyPrint(JsonOutput.toJson(subclusterConfig(manifestPath, inputPath)))
+    """
+    cat > subcluster_config.json <<'JSON'
+${configJson}
+JSON
+    """
+}
+
+process PREPARE_SUBCLUSTER_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path subcluster_script
+
+    output:
+    path "run_subcluster.py", emit: script_file
+
+    script:
+    """
+    test -f "${subcluster_script}"
+    """
+}
+
+process PREPARE_COHORT_QUERY {
+    executor 'local'
+    stageInMode "copy"
+    cpus 4
+    memory '16 GB'
+
+    input:
+    val entry
+    path download_script
+
+    output:
+    tuple val(entry), path("${entry.name}_input.h5ad")
+
+    script:
+    def sourcePath = entry.input_h5ad
+    def downloadName = entry.download_name ?: entry.name
+    """
+    set -euo pipefail
+    if [[ -f "${sourcePath}" ]]; then
+      cp "${sourcePath}" "${entry.name}_input.h5ad"
+    else
+      python "${download_script}" --dataset "${downloadName}" --output "${entry.name}_input.h5ad"
+    fi
+    """
+}
+
+process PREPARE_PIPELINE_SUBCLUSTER_CONFIG {
+    executor 'local'
+
+    input:
+    path atlas_latent
+    path cohort_dirs
+
+    output:
+    path "pipeline_cohort.json", emit: cohort_manifest
+    path "subcluster_config.json", emit: config_file
+
+    script:
+    def configJson = JsonOutput.prettyPrint(JsonOutput.toJson(subclusterConfig('pipeline_cohort.json', null)))
+    def cohortArgs = cohort_dirs.collect { "\"${it}\"" }.join(' ')
+    """
+    set -euo pipefail
+    python - "${atlas_latent}" ${cohortArgs} <<'PY'
+import json
+import pathlib
+import sys
+
+atlas = pathlib.Path(sys.argv[1]).resolve()
+queries = []
+for directory in sys.argv[2:]:
+    directory = pathlib.Path(directory).resolve()
+    with (directory / "entry.json").open() as handle:
+        entry = json.load(handle)
+    entry["latent_h5ad"] = str(directory / "query_latent.h5ad")
+    queries.append(entry)
+
+manifest = {
+    "atlas": {
+        "name": "Atlas",
+        "latent_h5ad": str(atlas),
+        "representation": "X",
+        "cell_type_key": "cell_type",
+        "batch_key": "batch",
+        "stage_key": "uicc_stage"
+    },
+    "queries": queries
+}
+with open("pipeline_cohort.json", "w") as handle:
+    json.dump(manifest, handle, indent=2)
+PY
+    cat > subcluster_config.json <<'JSON'
+${configJson}
+JSON
+    """
+}
+
 // ---------------------------------------------------------
 // ML TRAINING PROCESSES
 // ---------------------------------------------------------
@@ -186,7 +370,7 @@ process RUN_SCVI_RAYTUNE {
     output:
     path "run_config.json"
     path "summary.csv", optional: true
-    path "best_config.json", optional: true
+    path "best_config.json", optional: true, emit: best_config_json
     path "best_result.json", optional: true
     path "versions.json", optional: true
     path "ray_log_dir.txt", optional: true
@@ -275,9 +459,9 @@ process TRAIN_SCANVI_ATLAS {
     path "versions.json", optional: true
     path "scvi_history.csv", optional: true
     path "scanvi_history.csv", optional: true
-    path "ref_latent.h5ad", optional: true
+    path "ref_latent.h5ad", optional: true, emit: ref_latent_h5ad
     path "prepared_atlas.h5ad", optional: true
-    path "scanvi_model", optional: true
+    path "scanvi_model", optional: true, emit: scanvi_model
 
     script:
     def runDir = "${params.shared_run_root}/${params.experiment_name}"
@@ -359,6 +543,167 @@ process TRAIN_SCANVI_SURGERY {
     if [[ -d scanvi_model ]]; then
       cp -r scanvi_model "${runDir}/"
     fi
+    """
+}
+
+process RUN_COHORT_SURGERY {
+    label "gpu"
+    stageInMode "copy"
+    cpus params.slurm_cpus as int
+    memory params.slurm_memory
+    time params.slurm_time
+    clusterOptions { params.slurm_gpus ? "--gres=gpu:rtx5080:${params.slurm_gpus}" : "" }
+
+    input:
+    tuple val(entry), path(query_file)
+    path 'scanvi_model'
+    path surgery_script
+
+    output:
+    path "${entry.name}", emit: cohort_dir
+
+    script:
+    def name = entry.name as String
+    def runDir = "${params.shared_run_root}/${params.experiment_name}/surgery/${name}"
+    def config = [
+        experiment_name: "${params.experiment_name}_${name}",
+        input_h5ad: query_file.toString(),
+        reference_model: "scanvi_model",
+        shared_run_root: params.shared_run_root,
+        run_dir: runDir,
+        seed: params.seed,
+        condition_key: params.condition_key,
+        cell_type_key: params.cell_type_key,
+        dataset_name: name,
+        dataset_name_short: name,
+        dl_num_workers: params.dl_num_workers,
+        float32_matmul_precision: params.float32_matmul_precision,
+        map_ensembl: params.map_ensembl,
+        max_cells: params.max_cells,
+        scanvi_train_params: params.scanvi_train_params,
+        scanvi_early_stopping: params.scanvi_early_stopping,
+        scanvi_early_stopping_kwargs: params.scanvi_early_stopping_kwargs,
+        scanvi_plan_kwargs: params.scanvi_plan_kwargs
+    ]
+    def entryOutput = [
+        name: name,
+        representation: 'X_scVI',
+        cell_type_key: 'predicted_cell_type',
+        batch_key: entry.batch_key ?: 'sample',
+        stage_key: entry.stage_key,
+        stage_override: entry.stage_override,
+        stage_replacements: entry.stage_replacements
+    ].findAll { key, value -> value != null }
+    def configJson = JsonOutput.prettyPrint(JsonOutput.toJson(config))
+    def entryJson = JsonOutput.prettyPrint(JsonOutput.toJson(entryOutput))
+    """
+    set -euo pipefail
+
+    mkdir -p "${runDir}" "${name}" .cache/matplotlib .cache/numba .cache/torch
+    cat > run_config.json <<'JSON'
+${configJson}
+JSON
+
+    singularity exec --nv \\
+      --home "\$PWD" \\
+      --env XDG_CACHE_HOME="\$PWD/.cache" \\
+      --env MPLCONFIGDIR="\$PWD/.cache/matplotlib" \\
+      --env NUMBA_CACHE_DIR="\$PWD/.cache/numba" \\
+      --env TORCH_HOME="\$PWD/.cache/torch" \\
+      --bind "${params.bind_paths}" \\
+      "${params.sif}" \\
+      python "${surgery_script}" --config run_config.json
+
+    cp "${runDir}/query_latent.h5ad" "${name}/query_latent.h5ad"
+    cat > "${name}/entry.json" <<'JSON'
+${entryJson}
+JSON
+    """
+}
+
+process RUN_SUBCLUSTER {
+    label "subcluster"
+    container params.subcluster_container
+    stageInMode "copy"
+    cpus params.subcluster_cpus as int
+    memory params.subcluster_memory
+    time params.subcluster_time
+    clusterOptions { params.subcluster_backend == 'gpu' && params.subcluster_gpus ? "--gres=gpu:rtx5080:${params.subcluster_gpus}" : "" }
+
+    input:
+    path subcluster_script
+    path config_file
+    path cohort_manifest
+
+    output:
+    path "subcluster_results", emit: raw_results
+
+    script:
+    def runDir = "${params.shared_run_root}/${params.experiment_name}/subcluster"
+    """
+    set -euo pipefail
+    mkdir -p .cache/numba .cache/matplotlib
+    export NUMBA_NUM_THREADS="${params.subcluster_cpus}"
+    export NUMBA_CACHE_DIR="\$PWD/.cache/numba"
+    export MPLCONFIGDIR="\$PWD/.cache/matplotlib"
+    export XDG_CACHE_HOME="\$PWD/.cache"
+    export PYTHONPATH="${params.subcluster_pythonpath}${params.subcluster_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="${params.subcluster_ld_library_path}${params.subcluster_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
+    ${params.subcluster_backend == 'gpu' ? 'nvidia-smi -L' : 'true'}
+    "${params.subcluster_python}" "${subcluster_script}" --config "${config_file}"
+    mkdir -p "${runDir}"
+    cp -rn subcluster_results/. "${runDir}/"
+    """
+
+    stub:
+    """
+    mkdir -p subcluster_results
+    touch subcluster_results/stub.txt
+    """
+}
+
+process APPLY_SUBCLUSTER_MAPPINGS {
+    label "subcluster"
+    container params.subcluster_container
+    stageInMode "copy"
+    cpus 2
+    memory '8 GB'
+    time '02:00:00'
+
+    input:
+    path subcluster_script
+    path raw_results
+    val early_mapping_path
+    val late_mapping_path
+
+    output:
+    path "mapping_results"
+
+    script:
+    def runDir = "${params.shared_run_root}/${params.experiment_name}/subcluster"
+    def mappingConfigJson = JsonOutput.prettyPrint(JsonOutput.toJson([
+        early_mapping_json: early_mapping_path ?: null,
+        late_mapping_json: late_mapping_path ?: null
+    ]))
+    """
+    set -euo pipefail
+    export PYTHONPATH="${params.subcluster_pythonpath}${params.subcluster_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="${params.subcluster_ld_library_path}${params.subcluster_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
+    cat > subcluster_mapping_config.json <<'JSON'
+${mappingConfigJson}
+JSON
+    "${params.subcluster_python}" "${subcluster_script}" \\
+      --config subcluster_mapping_config.json \\
+      --apply-mappings-from "${raw_results}" \\
+      --mapping-output-dir mapping_results
+    mkdir -p "${runDir}"
+    cp -rn mapping_results/. "${runDir}/"
+    """
+
+    stub:
+    """
+    mkdir -p mapping_results
+    touch mapping_results/mapping_status.json
     """
 }
 
@@ -582,6 +927,37 @@ workflow RAYTUNE {
     RUN_SCVI_RAYTUNE(file(params.train_script), raytune_input)
 }
 
+workflow SUBCLUSTER {
+    setDefault('experiment_name', 'luca_subcluster_default')
+    setDefault('shared_run_root', '/datos/home/epaaso/slurm-gpu-jobs/subcluster/runs')
+    subclusterDefaults()
+
+    if (params.subcluster_input_h5ad && params.subcluster_cohort_manifest) {
+        log.warn "Both subcluster_input_h5ad and subcluster_cohort_manifest are set; using subcluster_input_h5ad."
+    }
+    if (!params.subcluster_input_h5ad && !params.subcluster_cohort_manifest) {
+        error "SUBCLUSTER requires subcluster_input_h5ad or subcluster_cohort_manifest"
+    }
+    if (params.subcluster_engine == 'scanpy' && params.subcluster_backend == 'gpu') {
+        error "The scanpy subclustering engine only supports subcluster_backend=cpu"
+    }
+
+    def subclusterInput = file(params.subcluster_input_h5ad ?: params.subcluster_cohort_manifest)
+    PREPARE_SUBCLUSTER_SCRIPT(file(params.subcluster_script))
+    PREPARE_SUBCLUSTER_CONFIG(subclusterInput)
+    RUN_SUBCLUSTER(
+        PREPARE_SUBCLUSTER_SCRIPT.out.script_file,
+        PREPARE_SUBCLUSTER_CONFIG.out.config_file,
+        subclusterInput
+    )
+    APPLY_SUBCLUSTER_MAPPINGS(
+        PREPARE_SUBCLUSTER_SCRIPT.out.script_file,
+        RUN_SUBCLUSTER.out.raw_results,
+        absoluteParamPath(params.early_mapping_json) ?: '',
+        absoluteParamPath(params.late_mapping_json) ?: ''
+    )
+}
+
 // ---------------------------------------------------------
 // AUTO-CHAINED END-TO-END PIPELINE WORKFLOW
 // ---------------------------------------------------------
@@ -599,10 +975,14 @@ workflow PIPELINE {
     setDefault('surgery_script', "$baseDir/bin/run_surgery.py")
     setDefault('apply_script', "$baseDir/bin/apply_raytune_best_config.py")
     setDefault('download_script', "$baseDir/bin/download_and_preprocess_dataset.py")
+    setDefault('pipeline_cohort_manifest', "$baseDir/configs/subcluster_cohort_default.json")
 
     // Datasets
     setDefault('input_h5ad', '/data/luca_atlas/extended_tumor_hvg.h5ad')
     setDefault('query_h5ad', '/datos/migccl/neto_maestria/luca_explore/surgeries/filtered_Trinks_Bishoff_2021_NSCLC.h5ad')
+
+    // The execution profile selects CPU/GPU backend and container.
+    subclusterDefaults()
 
     // Ray Tune parameters
     setDefault('metric', 'validation_loss')
@@ -727,29 +1107,48 @@ workflow PIPELINE {
     // 4. Train the reference Atlas with the optimized hyperparameters
     TRAIN_SCANVI_ATLAS(file(params.atlas_script), APPLY_RAYTUNE_CONFIG.out, atlas_input)
     
-    // 5. Determine query dataset file for surgery (download if not exists and is a known dataset name)
-    def query_file_path = params.query_h5ad
-    def query_file
-    def is_known_dataset = (query_file_path =~ /(?i)(zuani|deng|hu|bishoff|trinks)/)
-    def q_file_exists = file(query_file_path).exists()
-    
-    if (!q_file_exists && is_known_dataset) {
-        def ds_name = ""
-        if (query_file_path =~ /(?i)zuani/) { ds_name = "Zuani" }
-        else if (query_file_path =~ /(?i)deng/) { ds_name = "Deng" }
-        else if (query_file_path =~ /(?i)(hu_zhang|hu2023|hu)/) { ds_name = "Hu" }
-        else if (query_file_path =~ /(?i)(bishoff|trinks)/) { ds_name = "Bishoff" }
-        
-        log.info "Query dataset ${query_file_path} not found locally. Preparing automatic download & preprocessing for ${ds_name}..."
-        PREPARE_DATASET(ds_name, file(params.download_script))
-        query_file = PREPARE_DATASET.out
-    } else {
-        query_file = file(query_file_path)
+    // 5. Fan out surgery over the configured cohort. If no cohort is supplied,
+    // preserve query_h5ad as a single-query fallback.
+    def cohortEntries = []
+    if (params.pipeline_cohort_manifest) {
+        def cohortSpec = new JsonSlurper().parse(file(params.pipeline_cohort_manifest).toFile())
+        cohortEntries = cohortSpec.queries ?: []
     }
+    if (!cohortEntries) {
+        cohortEntries = [[
+            name: params.dataset_name_short,
+            input_h5ad: params.query_h5ad,
+            download_name: params.dataset_name_short,
+            batch_key: 'sample',
+            stage_key: 'stage'
+        ]]
+    }
+    def cohortChannel = Channel.fromList(cohortEntries)
+    PREPARE_COHORT_QUERY(cohortChannel, file(params.download_script))
+    RUN_COHORT_SURGERY(
+        PREPARE_COHORT_QUERY.out,
+        TRAIN_SCANVI_ATLAS.out.scanvi_model,
+        file(params.surgery_script)
+    )
 
-    // 6. Generate Surgery config and run Surgery on the query dataset using the newly trained reference model
-    PREPARE_SURGERY_CONFIG("scanvi_model")
-    TRAIN_SCANVI_SURGERY(file(params.surgery_script), PREPARE_SURGERY_CONFIG.out, query_file, TRAIN_SCANVI_ATLAS.out.scanvi_model)
+    // 6. Build a runtime manifest from the newly generated atlas/query latent
+    // representations and run early/late tumor-epithelial subclustering.
+    PREPARE_PIPELINE_SUBCLUSTER_CONFIG(
+        TRAIN_SCANVI_ATLAS.out.ref_latent_h5ad,
+        RUN_COHORT_SURGERY.out.cohort_dir.collect()
+    )
+    PREPARE_SUBCLUSTER_SCRIPT(file(params.subcluster_script))
+    RUN_SUBCLUSTER(
+        PREPARE_SUBCLUSTER_SCRIPT.out.script_file,
+        PREPARE_PIPELINE_SUBCLUSTER_CONFIG.out.config_file,
+        PREPARE_PIPELINE_SUBCLUSTER_CONFIG.out.cohort_manifest
+    )
+    APPLY_SUBCLUSTER_MAPPINGS(
+        PREPARE_SUBCLUSTER_SCRIPT.out.script_file,
+        RUN_SUBCLUSTER.out.raw_results,
+        absoluteParamPath(params.early_mapping_json) ?: '',
+        absoluteParamPath(params.late_mapping_json) ?: ''
+    )
 }
 
 // Default entry point runs the chained pipeline
