@@ -157,3 +157,5 @@ def test_apply_mappings_from_raw_results(tmp_path):
     )
     mapped = pd.read_csv(output_dir / "D_predicted_leiden_early.csv")
     assert mapped["cell_type_adjusted"].tolist() == ["Tumor new", "T cell"]
+    adjusted = ad.read_h5ad(output_dir / "query_latent_adjusted.h5ad")
+    assert adjusted.obs["cell_type_adjusted"].tolist() == ["Tumor new", "T cell"]

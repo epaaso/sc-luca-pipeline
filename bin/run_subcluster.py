@@ -674,6 +674,7 @@ def apply_mappings(raw_dir: str | pathlib.Path, cfg: Mapping[str, Any], output_d
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     merged = ad.read_h5ad(raw_dir / "query_latent.h5ad")
+    merged.obs["cell_type_adjusted"] = merged.obs["cell_type"].astype(str)
     status: dict[str, Any] = {"applied": [], "skipped": []}
     for stage_name, config_key in [("early", "early_mapping_json"), ("late", "late_mapping_json")]:
         mapping_path = cfg.get(config_key)
@@ -693,7 +694,14 @@ def apply_mappings(raw_dir: str | pathlib.Path, cfg: Mapping[str, Any], output_d
             mapping,
             output_dir,
         )
+        mapped = pd.Series(
+            [str(mapping[str(label)]) for label in stage_result.obs["leiden"].astype(str)],
+            index=stage_result.obs_names,
+            dtype="object",
+        )
+        merged.obs.loc[mapped.index, "cell_type_adjusted"] = mapped
         status["applied"].append(stage_name)
+    write_compatible_h5ad(merged, output_dir / "query_latent_adjusted.h5ad")
     write_json(output_dir / "mapping_status.json", status)
     return output_dir
 

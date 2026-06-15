@@ -19,6 +19,7 @@ This is the default execution workflow. It chains all stages together:
 3. **Atlas Training**: Merges the optimized parameters into the baseline configuration and trains a reference SCANVI model.
 4. **Cohort Dataset Surgery**: Maps the configured Bishoff, Deng, Hu, and Zuani datasets onto the newly trained SCANVI atlas.
 5. **Subclustering**: Merges atlas/query latent representations, splits early and late disease, and runs tumor/epithelial FAISS-Leiden subclustering.
+6. **Graph And Ecotype Analysis**: Builds early/late global ARACNe networks, clusters samples into ecotypes, then builds and Pearson-annotates one ARACNe network per ecotype.
 
 To run the complete chained pipeline:
 ```bash
@@ -27,6 +28,11 @@ nextflow run main.nf -profile remote_gpu
 ```
 
 The chained pipeline is primarily intended for `remote_gpu`, because model training and the default subclustering backend require a GPU.
+
+> **Validation status:** standalone subclustering and graph execution have been
+> validated, including a real Slurm graph smoke run on synthetic data. A
+> production biological graph run and a complete end-to-end `PIPELINE` run are
+> still pending. See [Current Development Status](#current-development-status).
 
 ### 2. Standalone Workflows
 
@@ -65,7 +71,15 @@ You can also run individual phases of the pipeline separately by using the `-ent
     -profile remote_gpu
   ```
 
-*Note: The remaining phases—mutual information extraction, network generation with ARACNE-AP, and graph visualization—are currently **pending implementation** in the pipeline. Once implemented, they will be added as new workflows.*
+* **Graph And Ecotype Analysis (`GRAPH` Workflow)**: Runs the complete graph phase from a merged H5AD or cell-level CSV.
+  ```bash
+  nextflow run main.nf -entry GRAPH \
+    -params-file configs/graph_default.yaml \
+    -profile remote_gpu \
+    --graph_input /path/to/subcluster/query_latent_adjusted.h5ad
+  ```
+
+  Run individual checkpoints with `--graph_step prepare`, `global-aracne`, `ecotype`, or `ecotype-aracne`. For steps after preparation, set `graph_global_dir`; for ecotype-specific ARACNe, also set `ecotype_dir` to prior outputs. `--graph_step all` is the default.
 
 ## Dataset Catalog (`metadata/dsets.csv`)
 
@@ -158,6 +172,92 @@ Each experiment writes to `<shared_run_root>/<experiment_name>/subcluster/`:
 - `atlas_<stage>_leiden.csv`, `atlas_<stage>_umap.csv`, and `atlas_<stage>_uparams.json`.
 - `qc_summary.json`, `versions.json`, contingency CSVs, UMAP plots, and heatmaps.
 - `<dataset>_predicted_leiden_<stage>.csv` when a valid mapping is supplied.
+- `query_latent_adjusted.h5ad`: merged cohort with `cell_type_adjusted`; base labels are retained for stages without mappings. Inside the Nextflow mapping task this file is under `mapping_results/`, then it is copied into the experiment's shared `subcluster/` output directory.
+
+---
+
+## Graph Generation And Ecotypes
+
+The `GRAPH` workflow replaces the early/late graph-generation and abundance-clustering notebooks. It accepts a cell-level CSV or H5AD and:
+
+1. Counts `cell_type_adjusted` per sample, keeping type/sample combinations with at least two cells.
+2. Writes early (`I`, `II`) and late (`III`, `III or IV`, `IV`) sample-by-cell-type matrices.
+3. Runs global ARACNe-AP independently for early and late disease.
+4. Normalizes sample abundances, builds a sample kNN graph, and discovers ecotypes with Leiden.
+5. Subsets each stage matrix by ecotype, runs ARACNe-AP again, and annotates resulting MI edges with Pearson correlation and p-value.
+
+The default graph input columns match `query_latent_adjusted.h5ad`: `cell_type_adjusted`, `batch`, `dataset`, and `stage`. Override `graph_cell_type_key`, `graph_sample_key`, `graph_dataset_key`, or `graph_stage_key` for another schema. When `cell_type_adjusted` is absent, the driver falls back to `cell_type`.
+
+ARACNe is CPU/Java software. The `remote_gpu` profile still submits graph work through Slurm, but graph tasks do not request a GPU. The remote runtime expects:
+
+- `/data/containers/ARACNe-AP/dist/aracne.jar`
+- `/data/containers/java/bin/java`
+- `/data/containers/sc-luca-subcluster-cu12.sif` and its shared Python dependency layer
+
+Important controls are `aracne_bootstraps` (default `500`), `aracne_pvalue` (default `1E-8`), `ecotype_k` (default `4`), and `ecotype_resolution` (default `0.2`). Use `aracne_dry_run: true` to validate matrix and ecotype preparation without launching Java.
+
+Outputs are written to `<shared_run_root>/<experiment_name>/graph/`:
+
+- `global/groups_{early,late}.csv`, count matrices, QC, and global ARACNe networks.
+- `ecotype/membership_{early,late}.csv`, normalized abundance matrices, sample kNN GraphML files, and cluster plots.
+- `ecotype_graphs/{early,late}/cluster_XX/` with ARACNe inputs, networks, QC, and `*_MI_pearson.txt` annotations.
+
+### Running From Subcluster Results
+
+After cluster mappings are reviewed, use the merged adjusted H5AD as the graph
+input:
+
+```bash
+nextflow run main.nf -entry GRAPH \
+  -params-file configs/graph_default.yaml \
+  -profile remote_gpu \
+  --graph_input /path/to/subcluster/query_latent_adjusted.h5ad \
+  --experiment_name luca_graph_production \
+  -resume
+```
+
+The default `500` ARACNe bootstraps are intended for production. For a quick
+runtime smoke test, override `--aracne_bootstraps 3`; do not interpret such a
+smoke run biologically.
+
+Always override `graph_input` for a meaningful run. The input currently present
+in `configs/graph_default.yaml` is a small historical smoke artifact.
+
+### Graph Checkpoint Examples
+
+Prepare matrices without running ARACNe:
+
+```bash
+nextflow run main.nf -entry GRAPH \
+  -params-file configs/graph_default.yaml \
+  -profile remote_gpu \
+  --graph_input /path/to/query_latent_adjusted.h5ad \
+  --graph_step prepare \
+  --aracne_dry_run true
+```
+
+Re-run ecotype discovery from prepared global matrices:
+
+```bash
+nextflow run main.nf -entry GRAPH \
+  -params-file configs/graph_default.yaml \
+  -profile remote_gpu \
+  --graph_input /path/to/query_latent_adjusted.h5ad \
+  --graph_step ecotype \
+  --graph_global_dir /path/to/prior/graph/global
+```
+
+Run per-ecotype ARACNe from reviewed memberships:
+
+```bash
+nextflow run main.nf -entry GRAPH \
+  -params-file configs/graph_default.yaml \
+  -profile remote_gpu \
+  --graph_input /path/to/query_latent_adjusted.h5ad \
+  --graph_step ecotype-aracne \
+  --graph_global_dir /path/to/prior/graph/global \
+  --ecotype_dir /path/to/prior/graph/ecotype
+```
 
 ### Container Build
 
@@ -183,6 +283,13 @@ ln -s /data/containers/faiss-cugraph-24-12.sif /data/containers/sc-luca-subclust
 
 The current local host does not expose an NVIDIA Docker runtime, so `local_gpu` must be validated on a host configured with NVIDIA Container Toolkit.
 
+The remote graph runtime also requires:
+
+```text
+/data/containers/ARACNe-AP/dist/aracne.jar
+/data/containers/java/bin/java
+```
+
 ---
 
 ## Automatic Dataset Downloading & Preprocessing
@@ -201,11 +308,40 @@ To make execution seamless and remote-friendly (especially on environments witho
 
 ## Folder Structure
 
-- `main.nf` - The primary Nextflow workflow definition containing `ATLAS`, `SURGERY`, `RAYTUNE`, `SUBCLUSTER`, and `PIPELINE`.
+- `main.nf` - The primary Nextflow workflow definition containing `ATLAS`, `SURGERY`, `RAYTUNE`, `SUBCLUSTER`, `GRAPH`, and `PIPELINE`.
 - `nextflow.config` - Defines `local`, `local_cpu`, `local_gpu`, and `remote_gpu` executor/container profiles.
-- `bin/` - Python scripts executed by Nextflow for the various workflows, including dataset retrieval and model training.
-- `configs/` - Base YAML parameter files and the canonical subclustering cohort manifest.
+- `bin/run_subcluster.py` - Cohort preparation, FAISS/Scanpy subclustering, diagnostics, and mappings.
+- `bin/run_graph_phase.py` - Global/ecotype matrix preparation, ARACNe, Leiden ecotypes, and Pearson annotations.
+- `configs/` - Base YAML parameter files, graph defaults, and the canonical subclustering cohort manifest.
 - `containers/subcluster/` - Reproducible FAISS/RAPIDS subclustering image recipe.
-- `tests/` - Unit and CPU integration tests for cohort preparation, mapping, and clustering.
+- `tests/` - Unit and CPU integration tests for subclustering and graph preparation.
 - `metadata/` - Contains dataset catalog files like `dsets.csv`.
 - `AGENTS.md` and `SKILLS.md` - Context for interacting with the AI agent system to develop or monitor the pipeline.
+
+---
+
+## Current Development Status
+
+Validated as of June 14, 2026:
+
+- `pytest -q`: `16 passed`.
+- Remote Slurm FAISS subclustering smoke completed previously.
+- Standalone remote `GRAPH` and graph checkpoint execution completed.
+- The final synthetic graph smoke is under:
+  `/datos/home/epaaso/slurm-gpu-jobs/graph/runs/graph_remote_final_20260613/graph`.
+
+The synthetic graph smoke used two six-sample ecotypes per stage, three ARACNe
+bootstraps, and a relaxed p-value. All expected artifacts were emitted, but the
+networks contain no significant edges. This validates execution only.
+
+Still pending:
+
+- Run subclustering on the complete biological cohort and curate early/late
+  cluster mappings.
+- Run production graph generation with the adjusted biological labels and
+  default `500` bootstraps.
+- Validate the complete chained `PIPELINE`. The latest stub attempt failed
+  before graph execution because `PREPARE_DATASET` could not find its staged
+  download script in the remote Slurm work directory.
+- Scale ARACNe by fanning stage/ecotype jobs into separate Nextflow tasks if
+  production runtime requires it.

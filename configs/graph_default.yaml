@@ -1,0 +1,30 @@
+experiment_name: luca_graph_default
+shared_run_root: /datos/home/epaaso/slurm-gpu-jobs/graph/runs
+
+# CSV or H5AD containing cell_type_adjusted (or cell_type), batch, dataset, stage.
+graph_input: /datos/home/epaaso/slurm-gpu-jobs/subcluster/runs/faiss_remote_gpu_run_20260609_v3/subcluster/query_latent.h5ad
+graph_cell_type_key: cell_type_adjusted
+graph_sample_key: batch
+graph_dataset_key: dataset
+graph_stage_key: stage
+# Set these when running only ecotype or ecotype-aracne against prior outputs.
+graph_global_dir:
+ecotype_dir:
+
+graph_min_cells_per_type_sample: 2
+graph_seed: 42
+ecotype_k: 4
+ecotype_resolution: 0.2
+
+aracne_jar: /data/containers/ARACNe-AP/dist/aracne.jar
+aracne_java: /data/containers/java/bin/java
+aracne_pvalue: 1E-8
+aracne_bootstraps: 500
+aracne_java_memory: 8G
+aracne_min_samples: 5
+aracne_min_nonzero_types: 3
+aracne_dry_run: false
+
+graph_cpus: 8
+graph_memory: 32 GB
+graph_time: "24:00:00"

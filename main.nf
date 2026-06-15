@@ -25,6 +25,14 @@ setDefault('subcluster_gpus', 0)
 setDefault('subcluster_python', 'python')
 setDefault('subcluster_pythonpath', '')
 setDefault('subcluster_ld_library_path', '')
+setDefault('graph_container', 'sc-luca-subcluster:latest')
+setDefault('graph_tool_container', 'tiagopeixoto/graph-tool:latest')
+setDefault('graph_python', 'python')
+setDefault('graph_pythonpath', '')
+setDefault('graph_ld_library_path', '')
+setDefault('graph_cpus', 8)
+setDefault('graph_memory', '32 GB')
+setDefault('graph_time', '24:00:00')
 
 def subclusterDefaults = {
     setDefault('subcluster_script', "$baseDir/bin/run_subcluster.py")
@@ -62,6 +70,30 @@ def subclusterDefaults = {
     setDefault('subcluster_python', 'python')
     setDefault('subcluster_pythonpath', '')
     setDefault('subcluster_ld_library_path', '')
+}
+
+def graphDefaults = {
+    setDefault('graph_script', "$baseDir/bin/run_graph_phase.py")
+    setDefault('graph_input', null)
+    setDefault('graph_step', 'all')
+    setDefault('graph_global_dir', null)
+    setDefault('ecotype_dir', null)
+    setDefault('graph_cell_type_key', 'cell_type_adjusted')
+    setDefault('graph_sample_key', 'batch')
+    setDefault('graph_dataset_key', 'dataset')
+    setDefault('graph_stage_key', 'stage')
+    setDefault('graph_min_cells_per_type_sample', 2)
+    setDefault('graph_seed', 42)
+    setDefault('ecotype_k', 4)
+    setDefault('ecotype_resolution', 0.2)
+    setDefault('aracne_jar', '/data/containers/ARACNe-AP/dist/aracne.jar')
+    setDefault('aracne_java', '/data/containers/java/bin/java')
+    setDefault('aracne_pvalue', '1E-8')
+    setDefault('aracne_bootstraps', 500)
+    setDefault('aracne_java_memory', '8G')
+    setDefault('aracne_min_samples', 5)
+    setDefault('aracne_min_nonzero_types', 3)
+    setDefault('aracne_dry_run', false)
 }
 
 def absoluteParamPath = { value ->
@@ -272,6 +304,62 @@ process PREPARE_SUBCLUSTER_SCRIPT {
     script:
     """
     test -f "${subcluster_script}"
+    """
+}
+
+process PREPARE_GRAPH_CONFIG {
+    executor 'local'
+
+    input:
+    path graph_input
+
+    output:
+    path "graph_config.json"
+
+    script:
+    def config = [
+        graph_input: graph_input.toString(),
+        graph_output_dir: 'graph_results',
+        graph_global_dir: params.graph_global_dir,
+        ecotype_dir: params.ecotype_dir,
+        graph_cell_type_key: params.graph_cell_type_key,
+        graph_sample_key: params.graph_sample_key,
+        graph_dataset_key: params.graph_dataset_key,
+        graph_stage_key: params.graph_stage_key,
+        graph_min_cells_per_type_sample: params.graph_min_cells_per_type_sample,
+        graph_seed: params.graph_seed,
+        ecotype_k: params.ecotype_k,
+        ecotype_resolution: params.ecotype_resolution,
+        aracne_jar: params.aracne_jar,
+        aracne_java: params.aracne_java,
+        aracne_pvalue: params.aracne_pvalue,
+        aracne_bootstraps: params.aracne_bootstraps,
+        aracne_java_memory: params.aracne_java_memory,
+        aracne_min_samples: params.aracne_min_samples,
+        aracne_min_nonzero_types: params.aracne_min_nonzero_types,
+        aracne_dry_run: params.aracne_dry_run
+    ]
+    def configJson = JsonOutput.prettyPrint(JsonOutput.toJson(config))
+    """
+    cat > graph_config.json <<'JSON'
+${configJson}
+JSON
+    """
+}
+
+process PREPARE_GRAPH_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path graph_script
+
+    output:
+    path "run_graph_phase.py"
+
+    script:
+    """
+    test -f "${graph_script}"
     """
 }
 
@@ -707,6 +795,199 @@ JSON
     """
 }
 
+process RUN_GRAPH_PHASE {
+    label "graph"
+    container params.graph_container
+    stageInMode "copy"
+    cpus params.graph_cpus as int
+    memory params.graph_memory
+    time params.graph_time
+
+    input:
+    path graph_script
+    path graph_config
+    path graph_input
+
+    output:
+    path "graph_results", emit: results
+
+    script:
+    def runDir = "${params.shared_run_root}/${params.experiment_name}/graph"
+    """
+    set -euo pipefail
+    export PYTHONPATH="${params.graph_pythonpath}${params.graph_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="${params.graph_ld_library_path}${params.graph_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
+    "${params.graph_python}" "${graph_script}" --config "${graph_config}" --step "${params.graph_step}"
+    mkdir -p "${runDir}"
+    cp -rn graph_results/. "${runDir}/"
+    """
+
+    stub:
+    """
+    mkdir -p graph_results
+    touch graph_results/stub.txt
+    """
+}
+
+process RUN_MARKER_EXTRACTION {
+    label "graph"
+    container params.graph_container
+    stageInMode "copy"
+    cpus 6
+    memory '32 GB'
+    time '24:00:00'
+
+    input:
+    path marker_script
+    path graph_results
+    val adata_dir
+    val stage
+
+    output:
+    tuple val(stage), path("marker_results_${stage}"), emit: results
+
+    script:
+    def membership_csv = "${graph_results}/ecotype/membership_${stage}.csv"
+    """
+    set -euo pipefail
+    export PYTHONPATH="${params.graph_pythonpath}${params.graph_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="${params.graph_ld_library_path}${params.graph_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
+    export NUMBA_CACHE_DIR="\$PWD/.cache/numba"
+    "${params.graph_python}" "${marker_script}" \\
+      --config "${graph_results}/run_config.json" \\
+      --adata-dir "${adata_dir}" \\
+      --membership "${membership_csv}" \\
+      --stage "${stage}" \\
+      --output_dir "marker_results_${stage}"
+    """
+}
+
+process RUN_CELLPHONEDB {
+    label "graph"
+    container params.graph_container
+    stageInMode "copy"
+    cpus 7
+    memory '16 GB'
+    time '12:00:00'
+
+    input:
+    path cpdb_script
+    path "early"
+    path "late"
+    path graph_results
+    val adata_dir
+    val cpdb_file
+
+    output:
+    path "cpdb_results", emit: results
+
+    script:
+    def membership_early = "${graph_results}/ecotype/membership_early.csv"
+    def membership_late = "${graph_results}/ecotype/membership_late.csv"
+    """
+    set -euo pipefail
+    export PYTHONPATH="${baseDir}/bin:/datos/home/epaaso/slurm-gpu-jobs/python_packages:${params.graph_pythonpath}${params.graph_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="${params.graph_ld_library_path}${params.graph_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
+    export NUMBA_CACHE_DIR="\$PWD/.cache/numba"
+    
+    mkdir -p merged_markers
+    cp -rn early/. merged_markers/ || true
+    cp -rn late/. merged_markers/ || true
+
+    "${params.graph_python}" "${cpdb_script}" all \\
+      --marker-root "merged_markers" \\
+      --output-root "cpdb_results" \\
+      --data-dir "${adata_dir}" \\
+      --graph-dir "${graph_results}/ecotype_graphs" \\
+      --cpdb-file "${cpdb_file}" \\
+      --membership-early "${membership_early}" \\
+      --membership-late "${membership_late}"
+    """
+}
+
+process RUN_GRAPH_ANALYSIS {
+    label "graph"
+    container params.graph_container
+    stageInMode "copy"
+
+    input:
+    path analysis_script
+    path graph_results
+
+    output:
+    path "analysis_output", emit: results
+
+    script:
+    """
+    set -euo pipefail
+    export PYTHONPATH="${baseDir}/bin:/datos/home/epaaso/slurm-gpu-jobs/python_packages:${params.graph_pythonpath}${params.graph_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="${params.graph_ld_library_path}${params.graph_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
+    mkdir -p analysis_output
+    
+    for stage in early late; do
+      net=\$(find "${graph_results}/global" -name "net_\${stage}_MI_pearson.txt" | head -n 1)
+      if [[ -n "\${net}" && -f "\${net}" ]]; then
+        "${params.graph_python}" "${analysis_script}" --graph-file "\${net}" --output-dir "analysis_output/global/\${stage}" --time-label "\${stage}"
+      fi
+    done
+    
+    for stage in early late; do
+      if [[ -d "${graph_results}/ecotype_graphs/\${stage}" ]]; then
+        for cluster_dir in "${graph_results}/ecotype_graphs/\${stage}"/cluster_*; do
+          if [[ -d "\${cluster_dir}" ]]; then
+            cluster=\$(basename "\${cluster_dir}")
+            net=\$(find "\${cluster_dir}" -name "*_MI_pearson.txt" | head -n 1)
+            if [[ -n "\${net}" && -f "\${net}" ]]; then
+              "${params.graph_python}" "${analysis_script}" --graph-file "\${net}" --output-dir "analysis_output/ecotype_graphs/\${stage}/\${cluster}" --time-label "\${stage}_\${cluster}"
+            fi
+          fi
+        done
+      fi
+    done
+    """
+}
+
+process RUN_CIRCOS_PLOT {
+    label "graph"
+    container params.graph_tool_container
+    stageInMode "copy"
+
+    input:
+    path circos_script
+    path graph_results
+    path metadata
+
+    output:
+    path "circos_output", emit: results
+
+    script:
+    """
+    set -euo pipefail
+    mkdir -p circos_output
+    
+    for stage in early late; do
+      net=\$(find "${graph_results}/global" -name "net_\${stage}_MI_pearson.txt" | head -n 1)
+      if [[ -n "\${net}" && -f "\${net}" ]]; then
+        python "${circos_script}" --graph-file "\${net}" --metadata "${metadata}" --output-dir "circos_output/global/\${stage}" --time-label "\${stage}"
+      fi
+    done
+    
+    for stage in early late; do
+      if [[ -d "${graph_results}/ecotype_graphs/\${stage}" ]]; then
+        for cluster_dir in "${graph_results}/ecotype_graphs/\${stage}"/cluster_*; do
+          if [[ -d "\${cluster_dir}" ]]; then
+            cluster=\$(basename "\${cluster_dir}")
+            net=\$(find "\${cluster_dir}" -name "*_MI_pearson.txt" | head -n 1)
+            if [[ -n "\${net}" && -f "\${net}" ]]; then
+              python "${circos_script}" --graph-file "\${net}" --metadata "${metadata}" --output-dir "circos_output/ecotype_graphs/\${stage}/\${cluster}" --time-label "\${stage}_\${cluster}"
+            fi
+          fi
+        done
+      fi
+    done
+    """
+}
+
 // ---------------------------------------------------------
 // WORKFLOW DEFINITIONS
 // ---------------------------------------------------------
@@ -958,6 +1239,86 @@ workflow SUBCLUSTER {
     )
 }
 
+workflow GRAPH {
+    setDefault('experiment_name', 'luca_graph_default')
+    setDefault('shared_run_root', '/datos/home/epaaso/slurm-gpu-jobs/graph/runs')
+    graphDefaults()
+    if (!params.graph_input) {
+        error "GRAPH requires graph_input (CSV or H5AD)"
+    }
+    def graphInput = file(params.graph_input)
+    PREPARE_GRAPH_SCRIPT(file(params.graph_script))
+    PREPARE_GRAPH_CONFIG(graphInput)
+    RUN_GRAPH_PHASE(PREPARE_GRAPH_SCRIPT.out, PREPARE_GRAPH_CONFIG.out, graphInput)
+}
+
+workflow ANALYSIS {
+    setDefault('experiment_name', 'luca_analysis_default')
+    setDefault('shared_run_root', '/datos/home/epaaso/slurm-gpu-jobs/graph/runs')
+    setDefault('graph_results_dir', null)
+    setDefault('marker_results_dir', null)
+    setDefault('circos_script', "$baseDir/bin/run_circos_plot.py")
+    setDefault('cell_mappings_json', "$baseDir/metadata/cell_mappings.json")
+    setDefault('run_circos', true)
+    setDefault('cpdb_script', "$baseDir/bin/run_cellphonedb.py")
+    setDefault('analysis_script', "$baseDir/bin/run_graph_analysis.py")
+    setDefault('adata_dir', '/datos/migccl/neto_maestria/luca_explore/surgeries/')
+    setDefault('cpdb_file', '/datos/migccl/neto_maestria/luca_explore/cellphoneDB/cellphonedb_v4.0.0.zip')
+
+    if (!params.graph_results_dir) {
+        error "ANALYSIS requires graph_results_dir"
+    }
+    if (!params.marker_results_dir) {
+        error "ANALYSIS requires marker_results_dir"
+    }
+
+    def graphResults = file(params.graph_results_dir)
+    def markerResults = file(params.marker_results_dir)
+
+    def markersDir = file("${params.marker_results_dir}/final_auc_regions")
+
+    RUN_CELLPHONEDB(
+        file(params.cpdb_script), 
+        markersDir, 
+        markersDir, 
+        graphResults, 
+        params.adata_dir, 
+        params.cpdb_file
+    )
+
+    RUN_GRAPH_ANALYSIS(file(params.analysis_script), graphResults)
+
+    if (params.run_circos) {
+        RUN_CIRCOS_PLOT(file(params.circos_script), graphResults, file(params.cell_mappings_json))
+    }
+
+    // Collect all final outputs to the unified results/ directory structure
+    def resultsDir = "${params.shared_run_root}/${params.experiment_name}/results"
+
+    RUN_CELLPHONEDB.out.results.map { res ->
+        """
+        mkdir -p "${resultsDir}/cellphonedb"
+        cp -rn ${res}/. "${resultsDir}/cellphonedb/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+
+    RUN_GRAPH_ANALYSIS.out.results.map { res ->
+        """
+        mkdir -p "${resultsDir}/graph_generation/analysis_plots"
+        cp -rn ${res}/. "${resultsDir}/graph_generation/analysis_plots/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+
+    if (params.run_circos) {
+        RUN_CIRCOS_PLOT.out.results.map { res ->
+            """
+            mkdir -p "${resultsDir}/graph_generation/analysis_plots"
+            cp -rn ${res}/. "${resultsDir}/graph_generation/analysis_plots/" || true
+            """
+        }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+    }
+}
+
 // ---------------------------------------------------------
 // AUTO-CHAINED END-TO-END PIPELINE WORKFLOW
 // ---------------------------------------------------------
@@ -975,7 +1336,15 @@ workflow PIPELINE {
     setDefault('surgery_script', "$baseDir/bin/run_surgery.py")
     setDefault('apply_script', "$baseDir/bin/apply_raytune_best_config.py")
     setDefault('download_script', "$baseDir/bin/download_and_preprocess_dataset.py")
+    setDefault('marker_script', "$baseDir/bin/run_marker_extraction.py")
+    setDefault('cpdb_script', "$baseDir/bin/run_cellphonedb.py")
+    setDefault('analysis_script', "$baseDir/bin/run_graph_analysis.py")
+    setDefault('circos_script', "$baseDir/bin/run_circos_plot.py")
+    setDefault('cell_mappings_json', "$baseDir/metadata/cell_mappings.json")
+    setDefault('run_circos', true)
     setDefault('pipeline_cohort_manifest', "$baseDir/configs/subcluster_cohort_default.json")
+    setDefault('adata_dir', '/datos/migccl/neto_maestria/luca_explore/surgeries/')
+    setDefault('cpdb_file', '/datos/migccl/neto_maestria/luca_explore/cellphonedb/cellphonedb_v4.0.0.zip')
 
     // Datasets
     setDefault('input_h5ad', '/data/luca_atlas/extended_tumor_hvg.h5ad')
@@ -983,6 +1352,7 @@ workflow PIPELINE {
 
     // The execution profile selects CPU/GPU backend and container.
     subclusterDefaults()
+    graphDefaults()
 
     // Ray Tune parameters
     setDefault('metric', 'validation_loss')
@@ -1149,6 +1519,84 @@ workflow PIPELINE {
         absoluteParamPath(params.early_mapping_json) ?: '',
         absoluteParamPath(params.late_mapping_json) ?: ''
     )
+
+    // 7. Build early/late global ARACNe networks, discover sample ecotypes,
+    // and build ecotype-specific ARACNe networks.
+    def adjustedCohort = APPLY_SUBCLUSTER_MAPPINGS.out.map { directory ->
+        file("${directory}/query_latent_adjusted.h5ad")
+    }
+    PREPARE_GRAPH_SCRIPT(file(params.graph_script))
+    PREPARE_GRAPH_CONFIG(adjustedCohort)
+    RUN_GRAPH_PHASE(PREPARE_GRAPH_SCRIPT.out, PREPARE_GRAPH_CONFIG.out, adjustedCohort)
+    
+    // 8. Run Downstream Marker Extraction, Graph Analysis, and CellPhoneDB
+    marker_stages = Channel.of('early', 'late')
+    marker_runs = RUN_MARKER_EXTRACTION(file(params.marker_script), RUN_GRAPH_PHASE.out.results, params.adata_dir, marker_stages)
+    early_markers = marker_runs.results.filter { it[0] == 'early' }.map { it[1] }
+    late_markers = marker_runs.results.filter { it[0] == 'late' }.map { it[1] }
+    RUN_CELLPHONEDB(
+        file(params.cpdb_script), 
+        early_markers, 
+        late_markers, 
+        RUN_GRAPH_PHASE.out.results, 
+        params.adata_dir, 
+        params.cpdb_file
+    )
+    RUN_GRAPH_ANALYSIS(file(params.analysis_script), RUN_GRAPH_PHASE.out.results)
+
+    if (params.run_circos) {
+        RUN_CIRCOS_PLOT(file(params.circos_script), RUN_GRAPH_PHASE.out.results, file(params.cell_mappings_json))
+    }
+
+    // Collect all final outputs to the unified results/ directory structure
+    def resultsDir = "${params.shared_run_root}/${params.experiment_name}/results"
+    
+    RUN_GRAPH_PHASE.out.results.map { graph_results ->
+        """
+        set -euo pipefail
+        mkdir -p "${resultsDir}/graph_generation" "${resultsDir}/ecotype_clustering"
+        cp -rn ${graph_results}/global/. "${resultsDir}/graph_generation/" || true
+        cp -rn ${graph_results}/ecotype_graphs/. "${resultsDir}/graph_generation/" || true
+        cp -rn ${graph_results}/ecotype/. "${resultsDir}/ecotype_clustering/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+    
+    early_markers.map { res ->
+        """
+        mkdir -p "${resultsDir}/marker_genes"
+        cp -rn ${res}/. "${resultsDir}/marker_genes/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+
+    late_markers.map { res ->
+        """
+        mkdir -p "${resultsDir}/marker_genes"
+        cp -rn ${res}/. "${resultsDir}/marker_genes/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+
+    RUN_CELLPHONEDB.out.results.map { res ->
+        """
+        mkdir -p "${resultsDir}/cellphonedb"
+        cp -rn ${res}/. "${resultsDir}/cellphonedb/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+
+    RUN_GRAPH_ANALYSIS.out.results.map { res ->
+        """
+        mkdir -p "${resultsDir}/graph_generation/analysis_plots"
+        cp -rn ${res}/. "${resultsDir}/graph_generation/analysis_plots/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+
+    if (params.run_circos) {
+        RUN_CIRCOS_PLOT.out.results.map { res ->
+            """
+            mkdir -p "${resultsDir}/graph_generation/analysis_plots"
+            cp -rn ${res}/. "${resultsDir}/graph_generation/analysis_plots/" || true
+            """
+        }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+    }
 }
 
 // Default entry point runs the chained pipeline
