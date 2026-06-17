@@ -7,6 +7,15 @@ import json
 import re
 
 import numpy as np
+import sys
+try:
+    import numpy.rec
+except ImportError:
+    try:
+        import numpy.core.records as records
+        sys.modules['numpy.rec'] = records
+    except ImportError:
+        pass
 import numba
 import anndata as ad
 import pandas as pd
@@ -57,7 +66,7 @@ if not local:
 def get_gseas_df(de_regions: dict, valid_types: List[str],
                  types: List[str], id_: str, load_gsea: bool = False,
                  gsea_folder:str = 'gseapy_gsea', gene_mapping: dict = None,
-                 num_threads:int = 1) -> pd.DataFrame:
+                 num_threads:int = 1, gene_sets: Any = 'h.all.v2023.2.Hs.symbols.gmt') -> pd.DataFrame:
     """
     Generates a combined DataFrame from GSEA results for different cell types.
 
@@ -99,7 +108,7 @@ def get_gseas_df(de_regions: dict, valid_types: List[str],
             gseas = np.load(gsea_path, allow_pickle='TRUE').item()
         else:
             pre_res = gseapy.prerank(rnk=gene_scores,
-                                     gene_sets='h.all.v2023.2.Hs.symbols.gmt',
+                                     gene_sets=gene_sets,
                                      threads=num_threads, permutation_num=100,
                                      seed=6, no_plot=True)
             # TODO  expose seed and permut num
@@ -497,6 +506,7 @@ class VisualizerConfig:
     load_gsea: bool = True
     load_gsea_heatmap: bool = True
     skip_visualization: bool = False
+    gsea_gmt: str = "h.all.v2023.2.Hs.symbols.gmt"
 
 @dataclass
 class DEConfig:
@@ -557,7 +567,7 @@ class DataLoader:
         file_ext = self.common.file_ext_name if self.common.file_ext_name else self.common.ext_name
         adata_file = os.path.join(self.common.backup_dir, f"filtered_{file_ext}.h5ad")
         logging.info(f"Loading AnnData from {adata_file}")
-        adata = ad.read_h5ad(adata_file)
+        adata = ad.read_h5ad(adata_file, backed='r')
         if self.config.obs_unique:
             adata.obs_names_make_unique()
         preds.index = preds.index.astype(str)
@@ -591,7 +601,10 @@ class DataLoader:
             raise Exception("Zero overlap between predictions index and adata index")
 
         try:
-            adata = adata[common_index].copy()
+            if adata.isbacked:
+                adata = adata[common_index].to_memory()
+            else:
+                adata = adata[common_index].copy()
             adata.obs.loc[common_index, self.config.cell_key] = preds.loc[common_index, self.config.cell_key]
         except Exception as e:
             raise Exception("Mismatch between predictions index and adata index") from e
@@ -952,15 +965,15 @@ class DEVisualizer:
 
     def plot_gsea(self, de_region: dict, valid_types: List[str]) -> None:
         logging.info("Plotting GSEA")
-        gmt_file = "h.all.v2023.2.Hs.symbols.gmt"
-        if not os.path.exists(gmt_file):
+        gmt_file = self.config.gsea_gmt if hasattr(self.config, "gsea_gmt") and self.config.gsea_gmt else "h.all.v2023.2.Hs.symbols.gmt"
+        if gmt_file == "h.all.v2023.2.Hs.symbols.gmt" and not os.path.exists(gmt_file):
             import subprocess
             subprocess.run([
                 "wget",
                 "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2023.2.Hs/h.all.v2023.2.Hs.symbols.gmt"
             ])
 
-        gsea_folder = os.path.join(self.common.w_folder,'..', "gseapy_gsea")
+        gsea_folder = os.path.join(self.common.w_folder, "gseapy_gsea")
         os.makedirs(gsea_folder, exist_ok=True)
 
         region = "tumorall"
@@ -974,7 +987,8 @@ class DEVisualizer:
             combined_dfs = {region: get_gseas_df(
                 de_region, valid_types, types,
                 self.common.ext_name, load_gsea=self.config.load_gsea,
-                gsea_folder=gsea_folder, gene_mapping=self.common.gene_mapping
+                gsea_folder=gsea_folder, gene_mapping=self.common.gene_mapping,
+                gene_sets=gmt_file
             )}
             combined_dfs[region].to_csv(gsea_path)
 

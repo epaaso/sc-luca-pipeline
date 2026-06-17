@@ -19,6 +19,12 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from scipy import sparse
+import sys
+try:
+    import numpy.core.records as records
+    sys.modules['numpy.rec'] = records
+except ImportError:
+    pass
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:

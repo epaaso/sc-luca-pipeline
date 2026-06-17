@@ -842,6 +842,7 @@ process RUN_MARKER_EXTRACTION {
     path graph_results
     val adata_dir
     val stage
+    path modal_de_script
 
     output:
     tuple val(stage), path("marker_results_${stage}"), emit: results
@@ -862,12 +863,228 @@ process RUN_MARKER_EXTRACTION {
     """
 }
 
+process PREPARE_MARKER_ANALYSIS_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path script_file
+
+    output:
+    path "run_marker_analysis.py"
+
+    script:
+    """
+    test -f "${script_file}"
+    """
+}
+
+process PREPARE_GRAPH_ANALYSIS_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path script_file
+
+    output:
+    path "run_graph_analysis.py"
+
+    script:
+    """
+    test -f "${script_file}"
+    """
+}
+
+process PREPARE_GSEA_GMT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path gmt_file
+
+    output:
+    path "h.all.v2023.2.Hs.symbols.gmt"
+
+    script:
+    """
+    test -f "${gmt_file}"
+    """
+}
+
+process PREPARE_CELLPHONEDB_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path script_file
+
+    output:
+    path "run_cellphonedb.py"
+
+    script:
+    """
+    test -f "${script_file}"
+    """
+}
+
+process PREPARE_CIRCOS_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path script_file
+
+    output:
+    path "run_circos_plot.py"
+
+    script:
+    """
+    test -f "${script_file}"
+    """
+}
+
+process PREPARE_MARKER_EXTRACTION_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path script_file
+
+    output:
+    path "run_marker_extraction.py"
+
+    script:
+    """
+    test -f "${script_file}"
+    """
+}
+
+process PREPARE_CELL_MAPPINGS {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path json_file
+
+    output:
+    path "cell_mappings.json"
+
+    script:
+    """
+    test -f "${json_file}"
+    """
+}
+
+process PREPARE_MODAL_DE_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path script_file
+
+    output:
+    path "modal_DE.py"
+
+    script:
+    """
+    test -f "${script_file}"
+    """
+}
+
+process PREPARE_CONSENSUS_SCRIPT {
+    executor 'local'
+    stageInMode "copy"
+
+    input:
+    path script_file
+
+    output:
+    path "aggregate_consensus.py"
+
+    script:
+    """
+    chmod +x "${script_file}"
+    """
+}
+
+process RUN_CONSENSUS_AGGREGATION {
+    label "graph"
+    container params.graph_container
+    stageInMode "copy"
+    cpus 1
+    memory '8 GB'
+
+    input:
+    path aggregate_script
+    path marker_root
+    val plots_dirs
+
+    output:
+    path "consensus_output", emit: results
+
+    script:
+    def dirs_string = plots_dirs.join(' ')
+    """
+    set -euo pipefail
+    mkdir -p consensus_output
+    export PYTHONPATH="${baseDir}/bin:/datos/home/epaaso/slurm-gpu-jobs/python_packages:${params.graph_pythonpath}${params.graph_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="${params.graph_ld_library_path}${params.graph_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
+    
+    mkdir -p unified_plots/gseapy_gsea
+    for d in ${dirs_string}; do
+      if [[ -d "\${d}" ]]; then
+        cp -rn "\${d}"/. unified_plots/ || true
+      fi
+    done
+
+    "${params.graph_python}" "${aggregate_script}" \
+      --marker-dir "${marker_root}" \
+      --gsea-dir "unified_plots/gseapy_gsea" \
+      --output-dir "consensus_output"
+    """
+}
+
+
+process RUN_MARKER_ANALYSIS {
+    label "graph"
+    container params.graph_container
+    stageInMode "copy"
+    cpus 1
+    memory '8 GB'
+
+    input:
+    path marker_analysis_script
+    path marker_file
+    path gsea_gmt
+    path modal_de_script
+
+    output:
+    path "marker_analysis_output", emit: results
+
+    script:
+    def name = marker_file.baseName
+    def time = name.contains("I-II") ? "I-II" : "III-IV"
+    """
+    set -euo pipefail
+    export PYTHONPATH="${baseDir}/bin:/datos/home/epaaso/slurm-gpu-jobs/python_packages:${params.graph_pythonpath}${params.graph_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
+    export LD_LIBRARY_PATH="${params.graph_ld_library_path}${params.graph_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
+    export NUMBA_CACHE_DIR="\$PWD/.cache/numba"
+    mkdir -p marker_analysis_output
+    "${params.graph_python}" "${marker_analysis_script}" \
+      --marker-file "${marker_file}" \
+      --gsea-gmt "${gsea_gmt}" \
+      --output-dir "marker_analysis_output" \
+      --name "${name}" \
+      --time "${time}"
+    """
+}
+
 process RUN_CELLPHONEDB {
     label "graph"
     container params.graph_container
     stageInMode "copy"
     cpus 7
-    memory '16 GB'
+    memory '96 GB'
     time '12:00:00'
 
     input:
@@ -877,6 +1094,7 @@ process RUN_CELLPHONEDB {
     path graph_results
     val adata_dir
     val cpdb_file
+    path modal_de_script
 
     output:
     path "cpdb_results", emit: results
@@ -886,6 +1104,7 @@ process RUN_CELLPHONEDB {
     def membership_late = "${graph_results}/ecotype/membership_late.csv"
     """
     set -euo pipefail
+    echo "Rerunning CellPhoneDB with memory optimization and numpy.rec shim"
     export PYTHONPATH="${baseDir}/bin:/datos/home/epaaso/slurm-gpu-jobs/python_packages:${params.graph_pythonpath}${params.graph_pythonpath ? ':' : ''}\${PYTHONPATH:-}"
     export LD_LIBRARY_PATH="${params.graph_ld_library_path}${params.graph_ld_library_path ? ':' : ''}\${LD_LIBRARY_PATH:-}"
     export NUMBA_CACHE_DIR="\$PWD/.cache/numba"
@@ -909,6 +1128,8 @@ process RUN_GRAPH_ANALYSIS {
     label "graph"
     container params.graph_container
     stageInMode "copy"
+    cpus 1
+    memory '8 GB'
 
     input:
     path analysis_script
@@ -927,7 +1148,12 @@ process RUN_GRAPH_ANALYSIS {
     for stage in early late; do
       net=\$(find "${graph_results}/global" -name "net_\${stage}_MI_pearson.txt" | head -n 1)
       if [[ -n "\${net}" && -f "\${net}" ]]; then
-        "${params.graph_python}" "${analysis_script}" --graph-file "\${net}" --output-dir "analysis_output/global/\${stage}" --time-label "\${stage}"
+        "${params.graph_python}" "${analysis_script}" \
+          --graph-file "\${net}" \
+          --output-dir "analysis_output/global/\${stage}" \
+          --time-label "\${stage}" \
+          --abundance-file "${graph_results}/ecotype/abundance_\${stage}.csv" \
+          --global-membership-file "${graph_results}/ecotype/membership_\${stage}.csv"
       fi
     done
     
@@ -938,7 +1164,12 @@ process RUN_GRAPH_ANALYSIS {
             cluster=\$(basename "\${cluster_dir}")
             net=\$(find "\${cluster_dir}" -name "*_MI_pearson.txt" | head -n 1)
             if [[ -n "\${net}" && -f "\${net}" ]]; then
-              "${params.graph_python}" "${analysis_script}" --graph-file "\${net}" --output-dir "analysis_output/ecotype_graphs/\${stage}/\${cluster}" --time-label "\${stage}_\${cluster}"
+              "${params.graph_python}" "${analysis_script}" \
+                --graph-file "\${net}" \
+                --output-dir "analysis_output/ecotype_graphs/\${stage}/\${cluster}" \
+                --time-label "\${stage}_\${cluster}" \
+                --groups-file "${graph_results}/global/groups_\${stage}.csv" \
+                --membership-file "${graph_results}/ecotype/membership_\${stage}.csv"
             fi
           fi
         done
@@ -951,6 +1182,8 @@ process RUN_CIRCOS_PLOT {
     label "graph"
     container params.graph_tool_container
     stageInMode "copy"
+    cpus 1
+    memory '8 GB'
 
     input:
     path circos_script
@@ -1263,7 +1496,11 @@ workflow ANALYSIS {
     setDefault('cpdb_script', "$baseDir/bin/run_cellphonedb.py")
     setDefault('analysis_script', "$baseDir/bin/run_graph_analysis.py")
     setDefault('adata_dir', '/datos/migccl/neto_maestria/luca_explore/surgeries/')
-    setDefault('cpdb_file', '/datos/migccl/neto_maestria/luca_explore/cellphoneDB/cellphonedb_v4.0.0.zip')
+    setDefault('cpdb_file', '/datos/migccl/neto_maestria/luca_explore/cellphonedb/cellphonedb_v4.0.0.zip')
+    setDefault('marker_analysis_script', "$baseDir/bin/run_marker_analysis.py")
+    setDefault('gsea_gmt', "$baseDir/metadata/h.all.v2023.2.Hs.symbols.gmt")
+    setDefault('modal_de_script', "$baseDir/bin/modal_DE.py")
+    setDefault('consensus_script', "$baseDir/bin/aggregate_consensus.py")
 
     if (!params.graph_results_dir) {
         error "ANALYSIS requires graph_results_dir"
@@ -1277,19 +1514,43 @@ workflow ANALYSIS {
 
     def markersDir = file("${params.marker_results_dir}/final_auc_regions")
 
+    PREPARE_MARKER_ANALYSIS_SCRIPT(file(params.marker_analysis_script))
+    PREPARE_GSEA_GMT(file(params.gsea_gmt))
+    PREPARE_GRAPH_ANALYSIS_SCRIPT(file(params.analysis_script))
+    PREPARE_CELLPHONEDB_SCRIPT(file(params.cpdb_script))
+    PREPARE_CIRCOS_SCRIPT(file(params.circos_script))
+    PREPARE_CELL_MAPPINGS(file(params.cell_mappings_json))
+    PREPARE_MODAL_DE_SCRIPT(file(params.modal_de_script))
+    PREPARE_CONSENSUS_SCRIPT(file(params.consensus_script))
+
     RUN_CELLPHONEDB(
-        file(params.cpdb_script), 
+        PREPARE_CELLPHONEDB_SCRIPT.out, 
         markersDir, 
         markersDir, 
         graphResults, 
         params.adata_dir, 
-        params.cpdb_file
+        params.cpdb_file,
+        PREPARE_MODAL_DE_SCRIPT.out
     )
 
-    RUN_GRAPH_ANALYSIS(file(params.analysis_script), graphResults)
+    def aucFiles = Channel.fromPath("${params.marker_results_dir}/**/tumor-vs-all/*_auc.npy")
+    RUN_MARKER_ANALYSIS(
+        PREPARE_MARKER_ANALYSIS_SCRIPT.out,
+        aucFiles,
+        PREPARE_GSEA_GMT.out,
+        PREPARE_MODAL_DE_SCRIPT.out
+    )
+
+    RUN_CONSENSUS_AGGREGATION(
+        PREPARE_CONSENSUS_SCRIPT.out,
+        markersDir,
+        RUN_MARKER_ANALYSIS.out.results.collect()
+    )
+
+    RUN_GRAPH_ANALYSIS(PREPARE_GRAPH_ANALYSIS_SCRIPT.out, graphResults)
 
     if (params.run_circos) {
-        RUN_CIRCOS_PLOT(file(params.circos_script), graphResults, file(params.cell_mappings_json))
+        RUN_CIRCOS_PLOT(PREPARE_CIRCOS_SCRIPT.out, graphResults, PREPARE_CELL_MAPPINGS.out)
     }
 
     // Collect all final outputs to the unified results/ directory structure
@@ -1299,6 +1560,13 @@ workflow ANALYSIS {
         """
         mkdir -p "${resultsDir}/cellphonedb"
         cp -rn ${res}/. "${resultsDir}/cellphonedb/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+
+    RUN_MARKER_ANALYSIS.out.results.map { res ->
+        """
+        mkdir -p "${resultsDir}/marker_genes/analysis_plots"
+        cp -rn ${res}/. "${resultsDir}/marker_genes/analysis_plots/" || true
         """
     }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
 
@@ -1316,6 +1584,16 @@ workflow ANALYSIS {
             cp -rn ${res}/. "${resultsDir}/graph_generation/analysis_plots/" || true
             """
         }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+    }
+
+    RUN_CONSENSUS_AGGREGATION.out.results.map { res ->
+        """
+        mkdir -p "${resultsDir}/marker_genes/consensus"
+        cp -r ${res}/. "${resultsDir}/marker_genes/consensus/"
+        """
+    }.subscribe { cmd -> 
+        def proc = ['bash', '-c', cmd].execute()
+        proc.waitFor()
     }
 }
 
@@ -1345,6 +1623,10 @@ workflow PIPELINE {
     setDefault('pipeline_cohort_manifest', "$baseDir/configs/subcluster_cohort_default.json")
     setDefault('adata_dir', '/datos/migccl/neto_maestria/luca_explore/surgeries/')
     setDefault('cpdb_file', '/datos/migccl/neto_maestria/luca_explore/cellphonedb/cellphonedb_v4.0.0.zip')
+    setDefault('marker_analysis_script', "$baseDir/bin/run_marker_analysis.py")
+    setDefault('gsea_gmt', "$baseDir/metadata/h.all.v2023.2.Hs.symbols.gmt")
+    setDefault('modal_de_script', "$baseDir/bin/modal_DE.py")
+    setDefault('consensus_script', "$baseDir/bin/aggregate_consensus.py")
 
     // Datasets
     setDefault('input_h5ad', '/data/luca_atlas/extended_tumor_hvg.h5ad')
@@ -1530,22 +1812,59 @@ workflow PIPELINE {
     RUN_GRAPH_PHASE(PREPARE_GRAPH_SCRIPT.out, PREPARE_GRAPH_CONFIG.out, adjustedCohort)
     
     // 8. Run Downstream Marker Extraction, Graph Analysis, and CellPhoneDB
+    PREPARE_MARKER_EXTRACTION_SCRIPT(file(params.marker_script))
+    PREPARE_MODAL_DE_SCRIPT(file(params.modal_de_script))
+
     marker_stages = Channel.of('early', 'late')
-    marker_runs = RUN_MARKER_EXTRACTION(file(params.marker_script), RUN_GRAPH_PHASE.out.results, params.adata_dir, marker_stages)
+    marker_runs = RUN_MARKER_EXTRACTION(
+        PREPARE_MARKER_EXTRACTION_SCRIPT.out, 
+        RUN_GRAPH_PHASE.out.results, 
+        params.adata_dir, 
+        marker_stages,
+        PREPARE_MODAL_DE_SCRIPT.out
+    )
     early_markers = marker_runs.results.filter { it[0] == 'early' }.map { it[1] }
     late_markers = marker_runs.results.filter { it[0] == 'late' }.map { it[1] }
+
+    // Gather all tumor-vs-all *_auc.npy files from RUN_MARKER_EXTRACTION
+    def early_auc = early_markers.map { dir -> file("${dir}/tumor-vs-all/*_auc.npy") }.flatMap()
+    def late_auc = late_markers.map { dir -> file("${dir}/tumor-vs-all/*_auc.npy") }.flatMap()
+    def pipeline_auc = early_auc.concat(late_auc)
+
+    PREPARE_MARKER_ANALYSIS_SCRIPT(file(params.marker_analysis_script))
+    PREPARE_GSEA_GMT(file(params.gsea_gmt))
+    PREPARE_GRAPH_ANALYSIS_SCRIPT(file(params.analysis_script))
+    PREPARE_CELLPHONEDB_SCRIPT(file(params.cpdb_script))
+    PREPARE_CIRCOS_SCRIPT(file(params.circos_script))
+    PREPARE_CELL_MAPPINGS(file(params.cell_mappings_json))
+    PREPARE_CONSENSUS_SCRIPT(file(params.consensus_script))
+
+    RUN_MARKER_ANALYSIS(
+        PREPARE_MARKER_ANALYSIS_SCRIPT.out,
+        pipeline_auc,
+        PREPARE_GSEA_GMT.out,
+        PREPARE_MODAL_DE_SCRIPT.out
+    )
+
+    RUN_CONSENSUS_AGGREGATION(
+        PREPARE_CONSENSUS_SCRIPT.out,
+        early_markers.concat(late_markers).collect(),
+        RUN_MARKER_ANALYSIS.out.results.collect()
+    )
+
     RUN_CELLPHONEDB(
-        file(params.cpdb_script), 
+        PREPARE_CELLPHONEDB_SCRIPT.out, 
         early_markers, 
         late_markers, 
         RUN_GRAPH_PHASE.out.results, 
         params.adata_dir, 
-        params.cpdb_file
+        params.cpdb_file,
+        PREPARE_MODAL_DE_SCRIPT.out
     )
-    RUN_GRAPH_ANALYSIS(file(params.analysis_script), RUN_GRAPH_PHASE.out.results)
+    RUN_GRAPH_ANALYSIS(PREPARE_GRAPH_ANALYSIS_SCRIPT.out, RUN_GRAPH_PHASE.out.results)
 
     if (params.run_circos) {
-        RUN_CIRCOS_PLOT(file(params.circos_script), RUN_GRAPH_PHASE.out.results, file(params.cell_mappings_json))
+        RUN_CIRCOS_PLOT(PREPARE_CIRCOS_SCRIPT.out, RUN_GRAPH_PHASE.out.results, PREPARE_CELL_MAPPINGS.out)
     }
 
     // Collect all final outputs to the unified results/ directory structure
@@ -1582,6 +1901,13 @@ workflow PIPELINE {
         """
     }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
 
+    RUN_MARKER_ANALYSIS.out.results.map { res ->
+        """
+        mkdir -p "${resultsDir}/marker_genes/analysis_plots"
+        cp -rn ${res}/. "${resultsDir}/marker_genes/analysis_plots/" || true
+        """
+    }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+
     RUN_GRAPH_ANALYSIS.out.results.map { res ->
         """
         mkdir -p "${resultsDir}/graph_generation/analysis_plots"
@@ -1596,6 +1922,16 @@ workflow PIPELINE {
             cp -rn ${res}/. "${resultsDir}/graph_generation/analysis_plots/" || true
             """
         }.subscribe { cmd -> ['bash', '-c', cmd].execute() }
+    }
+
+    RUN_CONSENSUS_AGGREGATION.out.results.map { res ->
+        """
+        mkdir -p "${resultsDir}/marker_genes/consensus"
+        cp -r ${res}/. "${resultsDir}/marker_genes/consensus/"
+        """
+    }.subscribe { cmd -> 
+        def proc = ['bash', '-c', cmd].execute()
+        proc.waitFor()
     }
 }
 
